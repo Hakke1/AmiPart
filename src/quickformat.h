@@ -54,6 +54,13 @@ BOOL QuickFormat_EnsureHandler(const struct RDBInfo *rdb, ULONG dostype,
 BOOL MountPartition(struct BlockDev *bd, const struct PartInfo *pi,
                     char *mounted_name, char *errbuf, ULONG errlen);
 
+/* Same, but for the remount after a grow/shrink: the partition MUST come back
+ * under its own drive name.  If that name is still in the DOS list (the old
+ * handler was never taken offline) it refuses instead of mounting a second
+ * handler under a DPFn name on the same partition. */
+BOOL RemountPartition(struct BlockDev *bd, const struct PartInfo *pi,
+                      char *mounted_name, char *errbuf, ULONG errlen);
+
 /* Unmount a DOS device by name (no colon) so a deleted partition doesn't need a
  * reboot to disappear.  Flushes and asks the handler to die (ACTION_DIE), then
  * removes the device node.  REFUSES (returns FALSE, errbuf set) if the volume is
@@ -78,7 +85,9 @@ typedef void (*UnmountProgressFn)(void *ud, const char *msg);
  * qualification disambiguates the name).  progress (may be NULL) is called
  * once if it has to wait for a just-mounted volume to settle.
  * Returns TRUE if our partition is offline (unmounted, or was never mounted on
- * this device); FALSE only if our handler is genuinely busy (open files). */
+ * this device); FALSE if our handler is genuinely busy (open files), or if a
+ * device of that name is mounted but not recognisably ours (it may still be
+ * a live handler on this partition, so it is treated as busy). */
 BOOL UnmountPartition(struct BlockDev *bd, const char *name,
                       UnmountProgressFn progress, void *ud,
                       char *errbuf, ULONG errlen);

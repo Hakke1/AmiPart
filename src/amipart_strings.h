@@ -1465,8 +1465,10 @@
 #define MSG_CLI_COPYDISK_GROW_ASK    1459
 #define MSG_CLI_COPYDISK_GROW_OK     1460
 #define MSG_CLI_COPYDISK_GROW_FAIL_FMT 1461
+#define MSG_QF_MOUNTED_OTHER_FMT     1462
+#define MSG_QF_NAME_TAKEN_FMT        1463
 
-#define MSG_COUNT 1462
+#define MSG_COUNT 1464
 
 #endif /* AMIPART_STRINGS_H */
 
@@ -2940,5 +2942,7 @@ const char *const DPStringDefaults[MSG_COUNT] = {
     /* 1459 MSG_CLI_COPYDISK_GROW_ASK */ "Extend the destination RDB to the full disk (partitions unchanged)?",
     /* 1460 MSG_CLI_COPYDISK_GROW_OK */ "Destination RDB extended to the full disk.\n",
     /* 1461 MSG_CLI_COPYDISK_GROW_FAIL_FMT */ "Could not write the extended RDB (err %d); the copy itself is complete.\n",
+    /* 1462 MSG_QF_MOUNTED_OTHER_FMT */ "%s: is mounted, but not from %s unit %lu - cannot take it offline",
+    /* 1463 MSG_QF_NAME_TAKEN_FMT */ "device name %s: is still in use - reboot to use the new size",
 };
 #endif /* DPSTRINGS_DEFINE_TABLE */

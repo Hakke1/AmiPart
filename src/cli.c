@@ -1753,7 +1753,7 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
         /* Only remount if we unmounted; under NOUNMOUNT the handler was
            only Inhibited and has already been released by the grow routine. */
         if (!no_unmount)
-            MountPartition(bd, pi, mnt, rmerr, sizeof(rmerr));
+            RemountPartition(bd, pi, mnt, rmerr, sizeof(rmerr));
         DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_FAIL_FMT), diag);
         cli_puts(outbuf);
         RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
@@ -1781,7 +1781,7 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
     if (fskind == CLI_GROW_FFS && !no_unmount) {
         DP_SNPRINTF(step, GS(MSG_GROW_PROG_REMOUNTING_FMT), pi->drive_name);
         cli_grow_progress(NULL, step);
-        if (MountPartition(bd, pi, mnt, rmerr, sizeof(rmerr))) {
+        if (RemountPartition(bd, pi, mnt, rmerr, sizeof(rmerr))) {
             MaterializeVolume(mnt);
             DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_REMOUNTED_FMT), pi->drive_name);
             cli_puts(outbuf);
@@ -2041,7 +2041,7 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
         strncpy(diag, outbuf, sizeof(diag) - 1); diag[sizeof(diag) - 1] = '\0';
         pi->high_cyl = old_hi;
         if (!no_unmount)
-            MountPartition(bd, pi, mnt, rmerr, sizeof(rmerr));
+            RemountPartition(bd, pi, mnt, rmerr, sizeof(rmerr));
         DP_SNPRINTF(outbuf, GS(MSG_SHR_FAIL_FMT), diag);
         cli_puts(outbuf);
         RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
@@ -2069,7 +2069,7 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
     if (fskind == CLI_GROW_FFS && !no_unmount) {
         DP_SNPRINTF(step, GS(MSG_GROW_PROG_REMOUNTING_FMT), pi->drive_name);
         cli_grow_progress(NULL, step);
-        if (MountPartition(bd, pi, mnt, rmerr, sizeof(rmerr))) {
+        if (RemountPartition(bd, pi, mnt, rmerr, sizeof(rmerr))) {
             MaterializeVolume(mnt);
             DP_SNPRINTF(outbuf, GS(MSG_SHR_REMOUNTED_FMT), pi->drive_name);
             cli_puts(outbuf);

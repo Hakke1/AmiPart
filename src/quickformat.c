@@ -128,8 +128,9 @@ static void apply_patch(struct DeviceNode *node, const struct FsPatch *fp)
     if (p & 0x0100) node->dn_GlobalVec = fp->global_vec;
 }
 
-BOOL MountPartition(struct BlockDev *bd, const struct PartInfo *pi,
-                    char *mounted_name, char *errbuf, ULONG errlen)
+static BOOL mount_partition(struct BlockDev *bd, const struct PartInfo *pi,
+                            BOOL exact_name, char *mounted_name,
+                            char *errbuf, ULONG errlen)
 {
     LONG  parmpkt[24];
     char  devname[40];
@@ -161,9 +162,19 @@ BOOL MountPartition(struct BlockDev *bd, const struct PartInfo *pi,
     }
 
     /* Pick a DOS device name not already mounted.  Prefer the real drive name;
-       fall back to DPF0..DPF9 if it (or an empty name) collides. */
+       fall back to DPF0..DPF9 if it (or an empty name) collides - unless the
+       caller needs the real name (a resize remount): mounting a second handler
+       under another name while the old one is still alive would put two
+       handlers on one partition, so refuse and let the caller require a
+       reboot. */
     strncpy(devname, pi->drive_name, sizeof(devname) - 1);
     devname[sizeof(devname) - 1] = '\0';
+    if (exact_name && devname[0] && name_in_use(devname)) {
+        char msg[96];
+        DP_SNPRINTF(msg, GS(MSG_QF_NAME_TAKEN_FMT), devname);
+        set_err(errbuf, errlen, msg);
+        return FALSE;
+    }
     if (devname[0] == '\0' || name_in_use(devname)) {
         for (i = 0; i < 10; i++) {
             DP_SNPRINTF(devname, "DPF%d", i);
@@ -353,6 +364,18 @@ void MaterializeVolume(const char *name)
     me->pr_WindowPtr = oldwin;
 }
 
+BOOL MountPartition(struct BlockDev *bd, const struct PartInfo *pi,
+                    char *mounted_name, char *errbuf, ULONG errlen)
+{
+    return mount_partition(bd, pi, FALSE, mounted_name, errbuf, errlen);
+}
+
+BOOL RemountPartition(struct BlockDev *bd, const struct PartInfo *pi,
+                      char *mounted_name, char *errbuf, ULONG errlen)
+{
+    return mount_partition(bd, pi, TRUE, mounted_name, errbuf, errlen);
+}
+
 BOOL UnmountDevice(const char *name, char *errbuf, ULONG errlen)
 {
     struct DosList *dl, *de;
@@ -475,6 +498,19 @@ BOOL UnmountPartition(struct BlockDev *bd, const char *name,
     if (de) task = de->dol_Task;
     UnLockDosList(LDF_DEVICES | LDF_READ);
     if (!de) {
+        /* A DOS device of that name that is NOT recognisably ours (different
+           exec device name or unit in its startup message) may still be a
+           live handler on this very partition - e.g. mounted through another
+           driver alias.  Treating it as "not mounted" would let the caller
+           resize under a live handler, so report it as busy instead; the
+           caller then falls back to its inhibit-and-reboot path. */
+        if (name_in_use(name)) {
+            char msg[128];
+            DP_SNPRINTF(msg, GS(MSG_QF_MOUNTED_OTHER_FMT), name, bd->devname,
+                        (unsigned long)bd->unit);
+            set_err(errbuf, errlen, msg);
+            return FALSE;
+        }
         set_err(errbuf, errlen, "");
         return TRUE;            /* our partition is not mounted - nothing to do */
     }
@@ -503,6 +539,14 @@ BOOL UnmountPartition(struct BlockDev *bd, const char *name,
     de = match_partition(dl, bd->devname, bd->unit, name);
     if (de) RemDosEntry(de);
     UnLockDosList(LDF_DEVICES | LDF_WRITE);
+
+    /* The name must now be free, or the remount cannot reuse it. */
+    if (name_in_use(name)) {
+        char msg[96];
+        DP_SNPRINTF(msg, GS(MSG_QF_NAME_TAKEN_FMT), name);
+        set_err(errbuf, errlen, msg);
+        return FALSE;
+    }
 
     set_err(errbuf, errlen, "");
     return TRUE;

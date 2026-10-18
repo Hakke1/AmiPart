@@ -1867,7 +1867,7 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
         /* Only remount if we unmounted; NOUNMOUNT only Inhibited (already
            released by the grow routine). */
         if (!no_unmount)
-            MountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr));
+            RemountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr));
         DP_SNPRINTF(s_msg, GS(MSG_SCR_GROW_FAIL_FMT), diag);
         sc_puts(s_msg);
         return RETURN_ERROR;
@@ -1896,7 +1896,7 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
     if (fskind == GROW_FS_FFS && !no_unmount) {
         DP_SNPRINTF(step, GS(MSG_GROW_PROG_REMOUNTING_FMT), pi->drive_name);
         script_grow_progress(NULL, step);
-        if (MountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr))) {
+        if (RemountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr))) {
             MaterializeVolume(mnt);
             DP_SNPRINTF(s_msg, GS(MSG_SCR_GROW_REMOUNTED_FMT), pi->drive_name);
             sc_puts(s_msg);
@@ -2099,7 +2099,7 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
         strncpy(diag, s_msg, sizeof(diag) - 1); diag[sizeof(diag) - 1] = '\0';
         pi->high_cyl = old_hi;
         if (!no_unmount)
-            MountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr));
+            RemountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr));
         DP_SNPRINTF(s_msg, GS(MSG_SHR_FAIL_FMT), diag);
         sc_puts(s_msg);
         return RETURN_ERROR;
@@ -2127,7 +2127,7 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
     if (fskind == GROW_FS_FFS && !no_unmount) {
         DP_SNPRINTF(step, GS(MSG_GROW_PROG_REMOUNTING_FMT), pi->drive_name);
         script_grow_progress(NULL, step);
-        if (MountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr))) {
+        if (RemountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr))) {
             MaterializeVolume(mnt);
             DP_SNPRINTF(s_msg, GS(MSG_SHR_REMOUNTED_FMT), pi->drive_name);
             sc_puts(s_msg);

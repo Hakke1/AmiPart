@@ -4513,3 +4513,9 @@ Destination RDB extended to the full disk.\n
 MSG_CLI_COPYDISK_GROW_FAIL_FMT
 Could not write the extended RDB (err %d); the copy itself is complete.\n
 ;
+MSG_QF_MOUNTED_OTHER_FMT
+%s: is mounted, but not from %s unit %lu - cannot take it offline
+;
+MSG_QF_NAME_TAKEN_FMT
+device name %s: is still in use - reboot to use the new size
+;

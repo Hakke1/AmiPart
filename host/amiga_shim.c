@@ -439,6 +439,11 @@ BOOL MountPartition(struct BlockDev *bd, const struct PartInfo *pi,
     host_note(errbuf, errlen, "host build: volumes are not mounted");
     return FALSE;
 }
+BOOL RemountPartition(struct BlockDev *bd, const struct PartInfo *pi,
+                      char *mounted_name, char *errbuf, ULONG errlen)
+{
+    return MountPartition(bd, pi, mounted_name, errbuf, errlen);
+}
 void MaterializeVolume(const char *name) { (void)name; }
 
 /* ---- quick-format: needs real filesystem handlers - Amiga only ---- */

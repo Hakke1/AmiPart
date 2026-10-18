@@ -920,7 +920,7 @@ int offer_ffs_grow(struct Window *win, struct BlockDev *bd,
                 EasyRequest(win, &rf_es, NULL);
             }
             grow_say(&prog_ud, GS(MSG_GROW_PROG_REMOUNTING_FMT), pi->drive_name);
-            if (MountPartition(bd, pi, mnt, rmerr, sizeof(rmerr))) {
+            if (RemountPartition(bd, pi, mnt, rmerr, sizeof(rmerr))) {
                 /* Grown and remounted with the new geometry - no reboot. */
                 /* Bring the volume online now so a lock orphaned during the
                    grow (e.g. Workbench's icon lock) revalidates silently
@@ -957,7 +957,7 @@ int offer_ffs_grow(struct Window *win, struct BlockDev *bd,
             pi->high_cyl = old_hi;
             if (!no_unmount) {
                 grow_say(&prog_ud, GS(MSG_GROW_PROG_REMOUNTING_FMT), pi->drive_name);
-                MountPartition(bd, pi, mnt, rmerr, sizeof(rmerr));
+                RemountPartition(bd, pi, mnt, rmerr, sizeof(rmerr));
             }
             if (prog_win) CloseWindow(prog_win);
             rc = GROW_ABORTED;
@@ -1299,7 +1299,7 @@ int offer_shrink(struct Window *win, struct BlockDev *bd,
             } else if (fskind == 1 && !no_unmount) {
                 grow_say(&prog_ud, GS(MSG_GROW_PROG_REMOUNTING_FMT),
                          pi->drive_name);
-                if (MountPartition(bd, pi, mnt, rmerr, sizeof(rmerr))) {
+                if (RemountPartition(bd, pi, mnt, rmerr, sizeof(rmerr))) {
                     grow_say(&prog_ud, GS(MSG_GROW_PROG_ONLINE), NULL);
                     MaterializeVolume(mnt);
                     rc = GROW_REMOUNTED;
@@ -1333,7 +1333,7 @@ int offer_shrink(struct Window *win, struct BlockDev *bd,
             if (!no_unmount) {
                 grow_say(&prog_ud, GS(MSG_GROW_PROG_REMOUNTING_FMT),
                          pi->drive_name);
-                MountPartition(bd, pi, mnt, rmerr, sizeof(rmerr));
+                RemountPartition(bd, pi, mnt, rmerr, sizeof(rmerr));
             }
             if (prog_win) CloseWindow(prog_win);
             rc = GROW_ABORTED;
