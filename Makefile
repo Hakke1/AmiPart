@@ -67,6 +67,7 @@ CCFLAGS = -g -MP -MMD -m68000 -Os $(TC_CCFLAGS) \
           -Wno-pointer-sign -Wno-stringop-truncation \
           -DNO_INLINE_STDARG \
           -fomit-frame-pointer -fno-tree-loop-distribution \
+          -fno-tree-loop-distribute-patterns \
           -fno-exceptions -ffunction-sections -fdata-sections \
           -Isrc -I$(SDKDIR)
 
