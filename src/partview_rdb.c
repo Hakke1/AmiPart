@@ -700,10 +700,41 @@ BOOL rdb_restore_extended(struct Window *win, struct BlockDev *bd)
 #define VRDB_DONE     2
 #define VRDB_MAXLINES 600   /* holds a 16-block hex dump (16 * 34 = 544 lines) */
 
-static char        vrdb_strs[VRDB_MAXLINES][80];
-static struct Node vrdb_nodes[VRDB_MAXLINES];
+/* Line text + list nodes, ~56 KB.  Allocated by vrdb_begin() when one of
+   the list dialogs below opens and released by vrdb_end() when it closes
+   (and once more from partview_run on exit, as a safety net), so the
+   buffer is not resident for the whole session. */
+static char      (*vrdb_strs)[80];
+static struct Node *vrdb_nodes;
 static struct List vrdb_list;
 static UWORD       vrdb_count;
+
+void vrdb_end(void)
+{
+    if (vrdb_strs)  { FreeVec(vrdb_strs);  vrdb_strs  = NULL; }
+    if (vrdb_nodes) { FreeVec(vrdb_nodes); vrdb_nodes = NULL; }
+    vrdb_count = 0;
+    vrdb_list.lh_Head     = (struct Node *)&vrdb_list.lh_Tail;
+    vrdb_list.lh_Tail     = NULL;
+    vrdb_list.lh_TailPred = (struct Node *)&vrdb_list.lh_Head;
+}
+
+/* Allocate (if needed) and reset the shared list.  FALSE = out of memory. */
+static BOOL vrdb_begin(void)
+{
+    if (!vrdb_strs)
+        vrdb_strs = (char (*)[80])AllocVec(sizeof(char[VRDB_MAXLINES][80]),
+                                           MEMF_PUBLIC | MEMF_CLEAR);
+    if (!vrdb_nodes)
+        vrdb_nodes = (struct Node *)AllocVec(sizeof(struct Node) * VRDB_MAXLINES,
+                                             MEMF_PUBLIC | MEMF_CLEAR);
+    if (!vrdb_strs || !vrdb_nodes) { vrdb_end(); return FALSE; }
+    vrdb_count = 0;
+    vrdb_list.lh_Head     = (struct Node *)&vrdb_list.lh_Tail;
+    vrdb_list.lh_Tail     = NULL;
+    vrdb_list.lh_TailPred = (struct Node *)&vrdb_list.lh_Head;
+    return TRUE;
+}
 
 /* Default width for a vrdb list window: wide enough for its longest line
    (plus scrollbar and frame) but never wider than the screen (issue #14/4). */
@@ -853,10 +884,7 @@ void rdb_view_block(struct Window *win, struct BlockDev *bd,
         for (i = 0; i < n; i++) sum += lw[i];
 
         /* ---- Build display lines ---- */
-        vrdb_count = 0;
-        vrdb_list.lh_Head     = (struct Node *)&vrdb_list.lh_Tail;
-        vrdb_list.lh_Tail     = NULL;
-        vrdb_list.lh_TailPred = (struct Node *)&vrdb_list.lh_Head;
+        if (!vrdb_begin()) { FreeVec(buf); return; }
 
         if (!rdb->valid)
             vrdb_add(GS(MSG_RDB_NO_VALID_RAW0));
@@ -1144,6 +1172,7 @@ vrdb_cleanup:
         if (vi)      FreeVisualInfo(vi);
         if (scr)     UnlockPubScreen(NULL, scr);
     }
+    vrdb_end();
     FreeVec(buf);
 }
 
@@ -1172,10 +1201,7 @@ void rdb_raw_scan(struct Window *win, struct BlockDev *bd)
     buf = (UBYTE *)AllocVec(512, MEMF_PUBLIC | MEMF_CLEAR);
     if (!buf) return;
 
-    vrdb_count = 0;
-    vrdb_list.lh_Head     = (struct Node *)&vrdb_list.lh_Tail;
-    vrdb_list.lh_Tail     = NULL;
-    vrdb_list.lh_TailPred = (struct Node *)&vrdb_list.lh_Head;
+    if (!vrdb_begin()) { FreeVec(buf); return; }
 
     /* Helper: decode a 4-byte block ID into printable text + tag */
 #define DECODE_ID(buf_, idval_, idtxt_, tag_) do { \
@@ -1697,9 +1723,9 @@ void rdb_raw_scan(struct Window *win, struct BlockDev *bd)
         UWORD scr_w, scr_h;
 
         scr = LockPubScreen(NULL);
-        if (!scr) return;
+        if (!scr) { vrdb_end(); return; }
         vi = GetVisualInfoA(scr, NULL);
-        if (!vi) { UnlockPubScreen(NULL, scr); return; }
+        if (!vi) { UnlockPubScreen(NULL, scr); vrdb_end(); return; }
 
         font_h = (UWORD)scr->Font->ta_YSize;
         bor_t  = (UWORD)scr->WBorTop + font_h + 1;
@@ -1777,6 +1803,7 @@ rscan_cleanup:
         if (vi)      FreeVisualInfo(vi);
         if (scr)     UnlockPubScreen(NULL, scr);
     }
+    vrdb_end();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1809,10 +1836,7 @@ void raw_disk_read(struct Window *win, struct BlockDev *bd)
     buf = (UBYTE *)AllocVec(512, MEMF_PUBLIC | MEMF_CLEAR);
     if (!buf) return;
 
-    vrdb_count = 0;
-    vrdb_list.lh_Head     = (struct Node *)&vrdb_list.lh_Tail;
-    vrdb_list.lh_Tail     = NULL;
-    vrdb_list.lh_TailPred = (struct Node *)&vrdb_list.lh_Head;
+    if (!vrdb_begin()) { FreeVec(buf); return; }
 
     /* --- TD_GETGEOMETRY --- */
     vrdb_add(GS(MSG_RDB_HDR_GETGEOMETRY));
@@ -2190,7 +2214,7 @@ void raw_disk_read(struct Window *win, struct BlockDev *bd)
         UWORD font_h, bor_t, bor_b, pad, row_h, btn_h, win_w, win_h, min_h, scr_w, scr_h;
 
         scr = LockPubScreen(NULL);
-        if (!scr) return;
+        if (!scr) { vrdb_end(); return; }
         vi = GetVisualInfoA(scr, NULL);
         if (!vi) goto rdr_cleanup;
 
@@ -2265,6 +2289,7 @@ rdr_cleanup:
         if (vi)      FreeVisualInfo(vi);
         if (scr)     UnlockPubScreen(NULL, scr);
     }
+    vrdb_end();
 }
 
 /* ------------------------------------------------------------------ */
@@ -2487,10 +2512,7 @@ void raw_hex_dump(struct Window *win, struct BlockDev *bd)
     buf = (UBYTE *)AllocVec(512, MEMF_PUBLIC | MEMF_CLEAR);
     if (!buf) return;
 
-    vrdb_count = 0;
-    vrdb_list.lh_Head     = (struct Node *)&vrdb_list.lh_Tail;
-    vrdb_list.lh_Tail     = NULL;
-    vrdb_list.lh_TailPred = (struct Node *)&vrdb_list.lh_Head;
+    if (!vrdb_begin()) { FreeVec(buf); return; }
 
     for (blk = start; blk < start + DUMP_BLOCKS; blk++) {
         ULONG id;
@@ -2558,9 +2580,9 @@ void raw_hex_dump(struct Window *win, struct BlockDev *bd)
         UWORD scr_w, scr_h;
 
         scr = LockPubScreen(NULL);
-        if (!scr) return;
+        if (!scr) { vrdb_end(); return; }
         vi = GetVisualInfoA(scr, NULL);
-        if (!vi) { UnlockPubScreen(NULL, scr); return; }
+        if (!vi) { UnlockPubScreen(NULL, scr); vrdb_end(); return; }
 
         font_h = scr->Font->ta_YSize;
         bor_t  = scr->WBorTop + font_h + 1;
@@ -2640,6 +2662,7 @@ hexdump_cleanup:
         if (vi)      FreeVisualInfo(vi);
         if (scr)     UnlockPubScreen(NULL, scr);
     }
+    vrdb_end();
 }
 
 /* ------------------------------------------------------------------ */
@@ -2821,10 +2844,7 @@ void smart_status(struct Window *win, struct BlockDev *bd)
         return;
     }
 
-    vrdb_count = 0;
-    vrdb_list.lh_Head     = (struct Node *)&vrdb_list.lh_Tail;
-    vrdb_list.lh_Tail     = NULL;
-    vrdb_list.lh_TailPred = (struct Node *)&vrdb_list.lh_Head;
+    if (!vrdb_begin()) { FreeVec(data_buf); FreeVec(thr_buf); return; }
 
     vrdb_add(GS(MSG_RDB_HDR_SMART));
     if (bd->disk_brand[0]) {
@@ -2955,9 +2975,9 @@ smart_show:
         UWORD font_h, bor_t, bor_b, pad, row_h, btn_h, win_w, win_h, min_h, scr_w, scr_h;
 
         scr = LockPubScreen(NULL);
-        if (!scr) return;
+        if (!scr) { vrdb_end(); return; }
         vi = GetVisualInfoA(scr, NULL);
-        if (!vi) { UnlockPubScreen(NULL, scr); return; }
+        if (!vi) { UnlockPubScreen(NULL, scr); vrdb_end(); return; }
 
         font_h = scr->Font->ta_YSize;
         bor_t  = scr->WBorTop + font_h + 1;
@@ -3033,6 +3053,7 @@ smart_win_cleanup:
         if (vi)      FreeVisualInfo(vi);
         if (scr)     UnlockPubScreen(NULL, scr);
     }
+    vrdb_end();
 }
 
 /* ------------------------------------------------------------------ */
@@ -3168,7 +3189,7 @@ badb_done:
 void bad_block_scan(struct Window *win, struct BlockDev *bd,
                     struct RDBInfo *rdb)
 {
-    static ULONG  bbl[MAX_BAD_BLOCKS];
+    ULONG        *bbl;
     static char   title_buf[96];
     UBYTE        *buf        = NULL;
     ULONG         total_blks = 0;
@@ -3203,7 +3224,8 @@ void bad_block_scan(struct Window *win, struct BlockDev *bd,
     }
 
     buf = (UBYTE *)AllocVec(bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
-    if (!buf) return;
+    bbl = (ULONG *)AllocVec(sizeof(ULONG) * MAX_BAD_BLOCKS, MEMF_PUBLIC | MEMF_CLEAR);
+    if (!buf || !bbl) { FreeVec(buf); FreeVec(bbl); return; }
 
     /* ---- Phase 1: scan with progress window ---- */
     {
@@ -3314,10 +3336,7 @@ void bad_block_scan(struct Window *win, struct BlockDev *bd,
     FreeVec(buf); buf = NULL;
 
     /* ---- Phase 2: show results ---- */
-    vrdb_count = 0;
-    vrdb_list.lh_Head     = (struct Node *)&vrdb_list.lh_Tail;
-    vrdb_list.lh_Tail     = NULL;
-    vrdb_list.lh_TailPred = (struct Node *)&vrdb_list.lh_Head;
+    if (!vrdb_begin()) { FreeVec(bbl); return; }
 
     vrdb_add(GS(MSG_RDB_HDR_BBSCAN_RESULTS));
     if (bd->disk_brand[0]) {
@@ -3452,6 +3471,8 @@ bbs_no_vrdb:
             }
         }
     }
+    FreeVec(bbl);
+    vrdb_end();
 }
 
 /* ------------------------------------------------------------------ */
@@ -3478,10 +3499,7 @@ void rdb_integrity_check(struct Window *win, struct BlockDev *bd,
         return;
     }
 
-    vrdb_count = 0;
-    vrdb_list.lh_Head     = (struct Node *)&vrdb_list.lh_Tail;
-    vrdb_list.lh_Tail     = NULL;
-    vrdb_list.lh_TailPred = (struct Node *)&vrdb_list.lh_Head;
+    if (!vrdb_begin()) return;
 
     vrdb_add(GS(MSG_RDB_HDR_INTEGRITY));
     vrdb_add("");
@@ -3498,9 +3516,9 @@ void rdb_integrity_check(struct Window *win, struct BlockDev *bd,
         UWORD scr_w, scr_h;
 
         scr = LockPubScreen(NULL);
-        if (!scr) return;
+        if (!scr) { vrdb_end(); return; }
         vi = GetVisualInfoA(scr, NULL);
-        if (!vi) { UnlockPubScreen(NULL, scr); return; }
+        if (!vi) { UnlockPubScreen(NULL, scr); vrdb_end(); return; }
 
         font_h = (UWORD)scr->Font->ta_YSize;
         bor_t  = (UWORD)scr->WBorTop + font_h + 1;
@@ -3578,6 +3596,7 @@ ic_cleanup:
         if (vi)      FreeVisualInfo(vi);
         if (scr)     UnlockPubScreen(NULL, scr);
     }
+    vrdb_end();
 }
 
 /* ------------------------------------------------------------------ */
@@ -3816,10 +3835,7 @@ void rdb_verify_extended(struct Window *win, struct BlockDev *bd)
         return;
     }
 
-    vrdb_count = 0;
-    vrdb_list.lh_Head     = (struct Node *)&vrdb_list.lh_Tail;
-    vrdb_list.lh_Tail     = NULL;
-    vrdb_list.lh_TailPred = (struct Node *)&vrdb_list.lh_Head;
+    if (!vrdb_begin()) { Close(fh); FreeVec(fbuf); FreeVec(dbuf); return; }
 
     DP_SNPRINTF(line, GS(MSG_RDB_VE_HDR_FMT),
             (unsigned long)num_blocks, (unsigned long)block_lo);
@@ -3879,9 +3895,9 @@ void rdb_verify_extended(struct Window *win, struct BlockDev *bd)
         UWORD scr_w, scr_h;
 
         scr = LockPubScreen(NULL);
-        if (!scr) return;
+        if (!scr) { vrdb_end(); return; }
         vi = GetVisualInfoA(scr, NULL);
-        if (!vi) { UnlockPubScreen(NULL, scr); return; }
+        if (!vi) { UnlockPubScreen(NULL, scr); vrdb_end(); return; }
 
         font_h = (UWORD)scr->Font->ta_YSize;
         bor_t  = (UWORD)scr->WBorTop + font_h + 1;
@@ -3959,4 +3975,5 @@ ve_cleanup:
         if (vi)      FreeVisualInfo(vi);
         if (scr)     UnlockPubScreen(NULL, scr);
     }
+    vrdb_end();
 }

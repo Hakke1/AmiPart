@@ -74,6 +74,8 @@ void  rdb_raw_scan       (struct Window *win, struct BlockDev *bd);
 void  raw_disk_read      (struct Window *win, struct BlockDev *bd);
 void  raw_hex_dump       (struct Window *win, struct BlockDev *bd);
 void  smart_status       (struct Window *win, struct BlockDev *bd);
+/* Release the shared list-dialog buffer (partview_rdb.c); safe when idle. */
+void  vrdb_end           (void);
 void  bad_block_scan     (struct Window *win, struct BlockDev *bd,
                           struct RDBInfo *rdb);
 void  rdb_integrity_check(struct Window *win, struct BlockDev *bd,

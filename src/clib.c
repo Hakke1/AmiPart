@@ -1,7 +1,7 @@
 /*
  * clib.c - Minimal C library for AmiPart (-nostdlib, Bartman ELF toolchain).
  *
- * Provides: sprintf, strcmp, strncpy, strtoul, strtol.
+ * Provides: sprintf, strcmp, strncpy, strcpy, strtoul, strtol.
  * memset/memcpy/memmove/strlen are in support/gcc8_c_support.c.
  */
 
@@ -32,6 +32,15 @@ char *strncpy(char *dst, const char *src, size_t n)
     while (n > 0 && *src) { *d++ = *src++; n--; }
     while (n > 0) { *d++ = '\0'; n--; }
     return dst;
+}
+
+/* gcc emits strcpy calls for constant-length copies under -Os. */
+char *strcpy(char *dst, const char *src)
+{
+    char *r = dst;
+    while ((*dst++ = *src++) != '\0')
+        ;
+    return r;
 }
 
 unsigned long strtoul(const char *s, char **end, int base)

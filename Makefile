@@ -61,7 +61,8 @@ endif
 
 # --- Common flags ------------------------------------------------------------
 
-CCFLAGS = -g -MP -MMD -m68000 -O2 $(TC_CCFLAGS) \
+# -Os: ~100 KB less code than -O2 on 68000; everything heavy here is disk-bound.
+CCFLAGS = -g -MP -MMD -m68000 -Os $(TC_CCFLAGS) \
           -Wall -Wextra -Wno-unused-function -Wno-volatile-register-var \
           -Wno-pointer-sign -Wno-stringop-truncation \
           -DNO_INLINE_STDARG \

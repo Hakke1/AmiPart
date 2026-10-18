@@ -540,6 +540,7 @@ BOOL filesystem_manager_dialog(struct RDBInfo *rdb)
     struct Gadget *gctx   = NULL;
     struct Gadget *lv_gad = NULL;
     struct Window *win    = NULL;
+    struct FSInfo *fs_snap = NULL;
     BOOL           dirty  = FALSE;
     WORD           sel    = -1;
 
@@ -670,7 +671,10 @@ BOOL filesystem_manager_dialog(struct RDBInfo *rdb)
     {
         BOOL running = TRUE;
         UWORD orig_num_fs = rdb->num_fs;   /* for Cancel rollback */
-        static struct FSInfo fs_snap[MAX_FILESYSTEMS];   /* entry state, so Cancel can tell edits/deletes from additions */
+        /* entry state, so Cancel can tell edits/deletes from additions */
+        fs_snap = (struct FSInfo *)AllocVec(sizeof(struct FSInfo) * MAX_FILESYSTEMS,
+                                            MEMF_PUBLIC | MEMF_CLEAR);
+        if (!fs_snap) goto fs_mgr_cleanup;
         memcpy(fs_snap, rdb->filesystems, sizeof(struct FSInfo) * (orig_num_fs > MAX_FILESYSTEMS ? MAX_FILESYSTEMS : orig_num_fs));
         /* Drain any events queued at the FS Manager window while a
            sub-dialog was active.  Without this, clicks on the visible
@@ -854,6 +858,7 @@ BOOL filesystem_manager_dialog(struct RDBInfo *rdb)
     }
 
 fs_mgr_cleanup:
+    if (fs_snap) FreeVec(fs_snap);
     if (win)   { RemoveGList(win, glist, -1); CloseWindow(win); }
     if (glist)   FreeGadgets(glist);
     if (vi)      FreeVisualInfo(vi);

@@ -47,35 +47,54 @@ static BOOL devname_equal_ci(const char *a, const char *b)
 /* Runs the disk-selector flow (its own storage, see file header comment)
  * until the user picks a destination unit, gives up, or closes/quits.
  * Returns TRUE and fills devname_out (>= 64 bytes) / unit_out on success. */
-static BOOL pick_destination_disk(char *devname_out, ULONG *unit_out)
+/* Device/unit lists are ~13 KB, so they are allocated per call rather
+   than kept resident. */
+struct pick_destination_disk_scratch {
+    struct DevNameList dn;
+    struct UnitList    ul;
+};
+
+static BOOL pick_destination_disk_body(struct pick_destination_disk_scratch *sc,
+                      char *devname_out, ULONG *unit_out)
 {
-    static struct DevNameList dn;
-    static struct UnitList    ul;
+    struct DevNameList *dn = &sc->dn;
+    struct UnitList    *ul = &sc->ul;
     static char               manual[64];
     WORD name_idx;
 
-    Devices_Scan(&dn);
+    Devices_Scan(dn);
 
     for (;;) {
         const char *devname;
         WORD        unit_idx;
 
-        name_idx = DiskSelect_PickDeviceName(&dn, manual, FALSE);
+        name_idx = DiskSelect_PickDeviceName(dn, manual, FALSE);
         if (name_idx == -1 || name_idx == DISKSEL_EXIT) return FALSE;
 
-        devname = (name_idx == DISKSEL_MANUAL) ? manual : dn.names[name_idx];
+        devname = (name_idx == DISKSEL_MANUAL) ? manual : dn->names[name_idx];
 
-        if (!DiskSelect_ProbeUnits(devname, &ul)) continue;  /* back to name list */
+        if (!DiskSelect_ProbeUnits(devname, ul)) continue;  /* back to name list */
 
-        unit_idx = DiskSelect_PickUnit(devname, &ul);
+        unit_idx = DiskSelect_PickUnit(devname, ul);
         if (unit_idx == DISKSEL_EXIT) return FALSE;
         if (unit_idx < 0) continue;  /* "Back" - reopen name list */
 
         strncpy(devname_out, devname, 63);
         devname_out[63] = '\0';
-        *unit_out = ul.entries[unit_idx].unit;
+        *unit_out = ul->entries[unit_idx].unit;
         return TRUE;
     }
+}
+
+static BOOL pick_destination_disk(char *devname_out, ULONG *unit_out)
+{
+    struct pick_destination_disk_scratch *sc =
+        (struct pick_destination_disk_scratch *)AllocVec(sizeof(*sc), MEMF_PUBLIC | MEMF_CLEAR);
+    BOOL ok;
+    if (!sc) return FALSE;
+    ok = pick_destination_disk_body(sc, devname_out, unit_out);
+    FreeVec(sc);
+    return ok;
 }
 
 static void show_ok(struct Window *win, const char *title, const char *body)

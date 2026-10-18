@@ -77,7 +77,9 @@ struct ScriptState {
     struct MBRInfo   s_mbr;          /* in-memory MBR (block 0)              */
 };
 
-static struct ScriptState s_st;      /* ~9 KB in BSS                    */
+/* ~16 KB (holds an RDBInfo); allocated for the life of script_run() so it
+   is not resident while the GUI runs. */
+static struct ScriptState *s_st;
 static char s_line[256];             /* raw line from file               */
 static char s_msg[512];              /* general formatting buffer        */
 static BOOL sc_read_rdb(struct BlockDev *bd, struct RDBInfo *rdb);   /* RDB_Read + damaged-chain warning */
@@ -113,7 +115,7 @@ static BOOL sc_ask_yn(const char *question)
     char buf[8];
     LONG got;
 
-    if (s_st.force) {
+    if (s_st->force) {
         DP_SNPRINTF(s_ebuf, GS(MSG_SCR_YN_FORCE_FMT), question);
         sc_puts(s_ebuf);
         return TRUE;
@@ -385,42 +387,42 @@ static void open_finish(ULONG ln)
     char szbuf[20];
     (void)ln;
 
-    FormatSize(s_st.bd->total_bytes, szbuf);
-    if (s_st.bd->disk_brand[0])
-        DP_SNPRINTF(s_msg, GS(MSG_SCR_OPEN_BRAND_SIZE_FMT), s_st.bd->disk_brand, szbuf);
+    FormatSize(s_st->bd->total_bytes, szbuf);
+    if (s_st->bd->disk_brand[0])
+        DP_SNPRINTF(s_msg, GS(MSG_SCR_OPEN_BRAND_SIZE_FMT), s_st->bd->disk_brand, szbuf);
     else
         DP_SNPRINTF(s_msg, GS(MSG_SCR_OPEN_SIZE_FMT), szbuf);
     sc_puts(s_msg);
 
-    memset(&s_st.rdb, 0, sizeof(s_st.rdb));
-    if (sc_read_rdb(s_st.bd, &s_st.rdb) && s_st.rdb.valid) {
+    memset(&s_st->rdb, 0, sizeof(s_st->rdb));
+    if (sc_read_rdb(s_st->bd, &s_st->rdb) && s_st->rdb.valid) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_EXISTING_RDB_FMT),
-                (ULONG)s_st.rdb.cylinders,
-                (unsigned)s_st.rdb.num_parts,
-                (unsigned)s_st.rdb.num_fs);
+                (ULONG)s_st->rdb.cylinders,
+                (unsigned)s_st->rdb.num_parts,
+                (unsigned)s_st->rdb.num_fs);
         sc_puts(s_msg);
     } else {
         sc_puts(GS(MSG_SCR_NO_RDB_FOUND));
-        s_st.rdb.valid = FALSE;
+        s_st->rdb.valid = FALSE;
     }
 
-    s_st.rdb_ready = TRUE;
-    s_st.dirty     = FALSE;
+    s_st->rdb_ready = TRUE;
+    s_st->dirty     = FALSE;
 
-    memset(&s_st.s_mbr, 0, sizeof(s_st.s_mbr));
-    MBR_Read(s_st.bd, &s_st.s_mbr);
+    memset(&s_st->s_mbr, 0, sizeof(s_st->s_mbr));
+    MBR_Read(s_st->bd, &s_st->s_mbr);
 }
 
 /* Close any currently-open device before a fresh OPEN/CREATE. */
 static void open_close_existing(ULONG ln)
 {
-    if (s_st.bd) {
-        if (s_st.dirty)
+    if (s_st->bd) {
+        if (s_st->dirty)
             sc_warn(ln, GS(MSG_SCR_PREV_UNSAVED));
-        RDB_FreeCode(&s_st.rdb);
-        BlockDev_Close(s_st.bd);
-        s_st.bd = NULL; s_st.rdb_ready = FALSE; s_st.dirty = FALSE;
-        memset(&s_st.s_mbr, 0, sizeof(s_st.s_mbr));
+        RDB_FreeCode(&s_st->rdb);
+        BlockDev_Close(s_st->bd);
+        s_st->bd = NULL; s_st->rdb_ready = FALSE; s_st->dirty = FALSE;
+        memset(&s_st->s_mbr, 0, sizeof(s_st->s_mbr));
     }
 }
 
@@ -440,7 +442,7 @@ static BOOL sc_read_rdb(struct BlockDev *bd, struct RDBInfo *rdb)
                     (unsigned long)rdb->chain_trunc_block,
                     RDB_TruncReasonStr(rdb->chain_trunc_reason));
         sc_puts(s_msg);
-        rdb->allow_truncated_write = s_st.force;
+        rdb->allow_truncated_write = s_st->force;
     }
     return ok;
 }
@@ -460,8 +462,8 @@ static LONG do_open(ULONG ln, char **tok, UWORD ntok)
         open_close_existing(ln);
         DP_SNPRINTF(s_msg, GS(MSG_SCR_OPENING_IMAGE_FMT), path);
         sc_puts(s_msg);
-        s_st.bd = BlockDev_OpenFile(path);
-        if (!s_st.bd) { sc_err(ln, GS(MSG_SCR_CANNOT_OPEN_IMAGE)); return RETURN_ERROR; }
+        s_st->bd = BlockDev_OpenFile(path);
+        if (!s_st->bd) { sc_err(ln, GS(MSG_SCR_CANNOT_OPEN_IMAGE)); return RETURN_ERROR; }
         open_finish(ln);
         return RETURN_OK;
     }
@@ -487,12 +489,12 @@ static LONG do_open(ULONG ln, char **tok, UWORD ntok)
         DP_SNPRINTF(s_msg, GS(MSG_SCR_OPENING_DEV_FMT), devname, unit);
         sc_puts(s_msg);
 
-        s_st.bd = BlockDev_Open(devname, unit);
-        if (!s_st.bd) { sc_err(ln, GS(MSG_SCR_CANNOT_OPEN_DEV)); return RETURN_ERROR; }
-        if (!BlockDev_IsHardDisk(s_st.bd)) {
-            ULONG devtype = s_st.bd->device_type;
-            BlockDev_Close(s_st.bd);
-            s_st.bd = NULL;
+        s_st->bd = BlockDev_Open(devname, unit);
+        if (!s_st->bd) { sc_err(ln, GS(MSG_SCR_CANNOT_OPEN_DEV)); return RETURN_ERROR; }
+        if (!BlockDev_IsHardDisk(s_st->bd)) {
+            ULONG devtype = s_st->bd->device_type;
+            BlockDev_Close(s_st->bd);
+            s_st->bd = NULL;
             DP_SNPRINTF(s_msg, GS(MSG_SCR_NOT_A_HARDDISK), devtype);
             sc_err(ln, s_msg);
             return RETURN_ERROR;
@@ -542,8 +544,8 @@ static LONG do_create(ULONG ln, char **tok, UWORD ntok)
     DP_SNPRINTF(s_msg, GS(MSG_SCR_CREATING_IMAGE_FMT), path, szbuf);
     sc_puts(s_msg);
 
-    s_st.bd = BlockDev_CreateFile(path, size_bytes);
-    if (!s_st.bd) { sc_err(ln, GS(MSG_SCR_CANNOT_CREATE_IMAGE)); return RETURN_ERROR; }
+    s_st->bd = BlockDev_CreateFile(path, size_bytes);
+    if (!s_st->bd) { sc_err(ln, GS(MSG_SCR_CANNOT_CREATE_IMAGE)); return RETURN_ERROR; }
     open_finish(ln);
     return RETURN_OK;
 }
@@ -555,30 +557,30 @@ static LONG do_create(ULONG ln, char **tok, UWORD ntok)
 static LONG do_init(ULONG ln, char **tok, UWORD ntok)
 {
     if (ntok < 2) { sc_err(ln, GS(MSG_SCR_INIT_USAGE)); return RETURN_ERROR; }
-    if (!s_st.bd) { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
+    if (!s_st->bd) { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
 
     /* ---- NEW ---- */
     if (ci_eq(tok[1], "NEW")) {
         ULONG cyls, heads, sects;
         char  szbuf[20];
 
-        if (s_st.rdb.valid) {
+        if (s_st->rdb.valid) {
             DP_SNPRINTF(s_msg, GS(MSG_SCR_INIT_EXISTING_RDB_FMT),
-                    ln, (ULONG)s_st.rdb.cylinders,
-                    (unsigned)s_st.rdb.num_parts);
+                    ln, (ULONG)s_st->rdb.cylinders,
+                    (unsigned)s_st->rdb.num_parts);
             sc_puts(s_msg);
             if (!sc_ask_yn(GS(MSG_SCR_INIT_DESTROY_ASK))) {
                 sc_puts(GS(MSG_SCR_ABORTED));
                 return RETURN_ERROR;
             }
         }
-        RDB_FreeCode(&s_st.rdb);
+        RDB_FreeCode(&s_st->rdb);
 
-        if (!BlockDev_GetGeometry(s_st.bd, &cyls, &heads, &sects))
+        if (!BlockDev_GetGeometry(s_st->bd, &cyls, &heads, &sects))
             { sc_err(ln, GS(MSG_SCR_CANNOT_READ_GEO)); return RETURN_ERROR; }
 
-        RDB_InitFresh(&s_st.rdb, cyls, heads, sects);
-        s_st.dirty = TRUE;
+        RDB_InitFresh(&s_st->rdb, cyls, heads, sects);
+        s_st->dirty = TRUE;
 
         {
             UQUAD total = (UQUAD)cyls * heads * sects * 512UL;
@@ -590,24 +592,24 @@ static LONG do_init(ULONG ln, char **tok, UWORD ntok)
 
         /* INIT NEW MBR: place RDB at block 1, write empty MBR at block 0. */
         if (has_flag(tok, ntok, "MBR")) {
-            s_st.rdb.rdb_block_lo = 1;
-            s_st.rdb.block_num    = 1;
-            if (s_st.dryrun) {
+            s_st->rdb.rdb_block_lo = 1;
+            s_st->rdb.block_num    = 1;
+            if (s_st->dryrun) {
                 sc_puts(GS(MSG_SCR_INIT_MBR_DRYRUN));
             } else {
-                if (!MBR_WriteEmpty(s_st.bd)) {
+                if (!MBR_WriteEmpty(s_st->bd)) {
                     sc_err(ln, GS(MSG_SCR_ADDMBR_WRITE_FAIL));
                     return RETURN_ERROR;
                 }
-                memset(&s_st.s_mbr, 0, sizeof(s_st.s_mbr));
-                s_st.s_mbr.valid = TRUE;
+                memset(&s_st->s_mbr, 0, sizeof(s_st->s_mbr));
+                s_st->s_mbr.valid = TRUE;
                 sc_puts(GS(MSG_SCR_INIT_MBR_WRITTEN));
             }
         } else {
             /* Plain INIT NEW: the fresh RDB goes to block 0, which destroys
                any MBR/FAT table when WRITE runs - drop the stale entries so
                later MBR commands don't act on phantom partitions. */
-            memset(&s_st.s_mbr, 0, sizeof(s_st.s_mbr));
+            memset(&s_st->s_mbr, 0, sizeof(s_st->s_mbr));
         }
         return RETURN_OK;
     }
@@ -617,34 +619,34 @@ static LONG do_init(ULONG ln, char **tok, UWORD ntok)
         ULONG new_cyls;
         char  sold[20], snew[20];
 
-        if (!s_st.rdb.valid)
+        if (!s_st->rdb.valid)
             { sc_err(ln, GS(MSG_SCR_NO_RDB_INIT)); return RETURN_ERROR; }
-        if (s_st.rdb.heads == 0 || s_st.rdb.sectors == 0)
+        if (s_st->rdb.heads == 0 || s_st->rdb.sectors == 0)
             { sc_err(ln, GS(MSG_SCR_RDB_GEO_INVALID)); return RETURN_ERROR; }
-        if (s_st.bd->total_bytes == 0)
+        if (s_st->bd->total_bytes == 0)
             { sc_err(ln, GS(MSG_SCR_CANNOT_DET_SIZE)); return RETURN_ERROR; }
 
-        new_cyls = (ULONG)((s_st.bd->total_bytes / 512UL)
-                           / ((UQUAD)s_st.rdb.heads * s_st.rdb.sectors));
+        new_cyls = (ULONG)((s_st->bd->total_bytes / 512UL)
+                           / ((UQUAD)s_st->rdb.heads * s_st->rdb.sectors));
 
-        FormatSize((UQUAD)s_st.rdb.cylinders
-                   * s_st.rdb.heads * s_st.rdb.sectors * 512UL, sold);
-        FormatSize(s_st.bd->total_bytes, snew);
+        FormatSize((UQUAD)s_st->rdb.cylinders
+                   * s_st->rdb.heads * s_st->rdb.sectors * 512UL, sold);
+        FormatSize(s_st->bd->total_bytes, snew);
 
-        if (new_cyls <= s_st.rdb.cylinders) {
+        if (new_cyls <= s_st->rdb.cylinders) {
             DP_SNPRINTF(s_msg, GS(MSG_SCR_NEWGEO_NOCHANGE_FMT),
-                    (ULONG)s_st.rdb.cylinders, sold, new_cyls, snew);
+                    (ULONG)s_st->rdb.cylinders, sold, new_cyls, snew);
             sc_puts(s_msg);
             return RETURN_OK;
         }
 
         DP_SNPRINTF(s_msg, GS(MSG_SCR_NEWGEO_CHANGE_FMT),
-                (ULONG)s_st.rdb.cylinders, sold, new_cyls, snew);
+                (ULONG)s_st->rdb.cylinders, sold, new_cyls, snew);
         sc_puts(s_msg);
 
-        s_st.rdb.cylinders = new_cyls;
-        s_st.rdb.hi_cyl    = new_cyls - 1;
-        s_st.dirty = TRUE;
+        s_st->rdb.cylinders = new_cyls;
+        s_st->rdb.hi_cyl    = new_cyls - 1;
+        s_st->dirty = TRUE;
         return RETURN_OK;
     }
 
@@ -669,11 +671,11 @@ static LONG do_addpart(ULONG ln, char **tok, UWORD ntok)
     char   name[32];
     UWORD  nlen, i;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_INIT)); return RETURN_ERROR; }
-    if (s_st.rdb.num_parts >= MAX_PARTITIONS)
+    if (s_st->rdb.num_parts >= MAX_PARTITIONS)
         { sc_err(ln, GS(MSG_SCR_PART_TABLE_FULL)); return RETURN_ERROR; }
 
     /* NAME (required) */
@@ -690,7 +692,7 @@ static LONG do_addpart(ULONG ln, char **tok, UWORD ntok)
     /* LOW (required) - literal cyl or NEXT */
     v = kwarg(tok, ntok, "LOW");
     if (!v) { sc_err(ln, GS(MSG_SCR_ADDPART_NEED_LOW)); return RETURN_ERROR; }
-    if (!parse_low(v, &s_st.rdb, &low)) {
+    if (!parse_low(v, &s_st->rdb, &low)) {
         sc_err(ln, GS(MSG_SCR_ADDPART_LOW_INVALID));
         return RETURN_ERROR;
     }
@@ -698,8 +700,8 @@ static LONG do_addpart(ULONG ln, char **tok, UWORD ntok)
     /* HIGH (required) - literal cyl, END, or +NNN[KMG] */
     v = kwarg(tok, ntok, "HIGH");
     if (!v) { sc_err(ln, GS(MSG_SCR_ADDPART_NEED_HIGH)); return RETURN_ERROR; }
-    if (!parse_high(v, low, s_st.rdb.hi_cyl,
-                    s_st.rdb.heads, s_st.rdb.sectors, &high)) {
+    if (!parse_high(v, low, s_st->rdb.hi_cyl,
+                    s_st->rdb.heads, s_st->rdb.sectors, &high)) {
         sc_err(ln, GS(MSG_SCR_ADDPART_HIGH_INVALID));
         return RETURN_ERROR;
     }
@@ -730,14 +732,14 @@ static LONG do_addpart(ULONG ln, char **tok, UWORD ntok)
     /* Validate range */
     if (low > high)
         { sc_err(ln, GS(MSG_SCR_ADDPART_LOW_GT_HIGH)); return RETURN_ERROR; }
-    if (low < s_st.rdb.lo_cyl) {
+    if (low < s_st->rdb.lo_cyl) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_ADDPART_LOW_RESERVED_FMT),
-                low, (ULONG)s_st.rdb.lo_cyl);
+                low, (ULONG)s_st->rdb.lo_cyl);
         sc_err(ln, s_msg); return RETURN_ERROR;
     }
-    if (high > s_st.rdb.hi_cyl) {
+    if (high > s_st->rdb.hi_cyl) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_ADDPART_HIGH_EXCEEDS_FMT),
-                high, (ULONG)s_st.rdb.hi_cyl);
+                high, (ULONG)s_st->rdb.hi_cyl);
         sc_err(ln, s_msg); return RETURN_ERROR;
     }
 
@@ -747,8 +749,8 @@ static LONG do_addpart(ULONG ln, char **tok, UWORD ntok)
     {
         struct PartInfo *clamp_ex = NULL;
         ULONG clamp_to = 0;
-        for (i = 0; i < s_st.rdb.num_parts; i++) {
-            struct PartInfo *ex = &s_st.rdb.parts[i];
+        for (i = 0; i < s_st->rdb.num_parts; i++) {
+            struct PartInfo *ex = &s_st->rdb.parts[i];
             if (low >= ex->low_cyl && low <= ex->high_cyl) {
                 DP_SNPRINTF(s_msg, GS(MSG_SCR_ADDPART_OVERLAP_FMT),
                         low, high, ex->drive_name,
@@ -775,7 +777,7 @@ static LONG do_addpart(ULONG ln, char **tok, UWORD ntok)
         }
     }
 
-    pi = &s_st.rdb.parts[s_st.rdb.num_parts];
+    pi = &s_st->rdb.parts[s_st->rdb.num_parts];
     memset(pi, 0, sizeof(*pi));
     strncpy(pi->drive_name, name, 31); pi->drive_name[31] = '\0';
     pi->low_cyl       = low;
@@ -805,8 +807,8 @@ static LONG do_addpart(ULONG ln, char **tok, UWORD ntok)
         strncpy(pi->volume_name, v, sizeof(pi->volume_name) - 1);
         pi->volume_name[sizeof(pi->volume_name) - 1] = '\0';
         pi->want_format = 1;
-        pi->heads   = s_st.rdb.heads;
-        pi->sectors = s_st.rdb.sectors;
+        pi->heads   = s_st->rdb.heads;
+        pi->sectors = s_st->rdb.sectors;
     }
 
     /* SAFE (optional flag) - format with the OS formatter (the real handler,
@@ -825,12 +827,12 @@ static LONG do_addpart(ULONG ln, char **tok, UWORD ntok)
             sc_warn(ln, GS(MSG_SCR_DELDIR_NEEDS_VOLNAME));
     }
 
-    s_st.rdb.num_parts++;
-    s_st.dirty = TRUE;
+    s_st->rdb.num_parts++;
+    s_st->dirty = TRUE;
 
     {
-        ULONG blks_cyl = (s_st.rdb.heads > 0 && s_st.rdb.sectors > 0)
-                         ? s_st.rdb.heads * s_st.rdb.sectors : 1;
+        ULONG blks_cyl = (s_st->rdb.heads > 0 && s_st->rdb.sectors > 0)
+                         ? s_st->rdb.heads * s_st->rdb.sectors : 1;
         char dtbuf[16], szbuf[20];
         FormatDosType(dostype, dtbuf);
         FormatSize((UQUAD)(high - low + 1) * blks_cyl * 512UL, szbuf);
@@ -851,9 +853,9 @@ static LONG do_delpart(ULONG ln, char **tok, UWORD ntok)
     char  name[32];
     UWORD nlen, i, j;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN_INIT)); return RETURN_ERROR; }
 
     v = kwarg(tok, ntok, "NAME");
@@ -866,23 +868,23 @@ static LONG do_delpart(ULONG ln, char **tok, UWORD ntok)
     if (nlen > 0 && name[nlen - 1] == ':') name[--nlen] = '\0';
     if (nlen == 0) { sc_err(ln, GS(MSG_SCR_DELPART_NAME_EMPTY)); return RETURN_ERROR; }
 
-    for (i = 0; i < s_st.rdb.num_parts; i++) {
-        if (ci_eq(s_st.rdb.parts[i].drive_name, name)) {
+    for (i = 0; i < s_st->rdb.num_parts; i++) {
+        if (ci_eq(s_st->rdb.parts[i].drive_name, name)) {
             DP_SNPRINTF(s_msg, GS(MSG_SCR_DELPART_DELETED_FMT),
-                    s_st.rdb.parts[i].drive_name,
-                    (ULONG)s_st.rdb.parts[i].low_cyl,
-                    (ULONG)s_st.rdb.parts[i].high_cyl);
+                    s_st->rdb.parts[i].drive_name,
+                    (ULONG)s_st->rdb.parts[i].low_cyl,
+                    (ULONG)s_st->rdb.parts[i].high_cyl);
             /* Remember for unmount after WRITE (no reboot needed). */
-            if (s_st.unmount_count < MAX_PARTITIONS) {
-                strncpy(s_st.unmount_names[s_st.unmount_count],
-                        s_st.rdb.parts[i].drive_name, 31);
-                s_st.unmount_names[s_st.unmount_count][31] = '\0';
-                s_st.unmount_count++;
+            if (s_st->unmount_count < MAX_PARTITIONS) {
+                strncpy(s_st->unmount_names[s_st->unmount_count],
+                        s_st->rdb.parts[i].drive_name, 31);
+                s_st->unmount_names[s_st->unmount_count][31] = '\0';
+                s_st->unmount_count++;
             }
-            for (j = i; j + 1 < s_st.rdb.num_parts; j++)
-                s_st.rdb.parts[j] = s_st.rdb.parts[j + 1];
-            s_st.rdb.num_parts--;
-            s_st.dirty = TRUE;
+            for (j = i; j + 1 < s_st->rdb.num_parts; j++)
+                s_st->rdb.parts[j] = s_st->rdb.parts[j + 1];
+            s_st->rdb.num_parts--;
+            s_st->dirty = TRUE;
             sc_puts(s_msg);
             return RETURN_OK;
         }
@@ -909,12 +911,12 @@ static LONG do_checkrdb(ULONG ln)
 {
     ULONG errs;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN_INIT)); return RETURN_ERROR; }
 
-    errs = RDB_IntegrityCheck(s_st.bd, &s_st.rdb, checkrdb_cb, NULL);
+    errs = RDB_IntegrityCheck(s_st->bd, &s_st->rdb, checkrdb_cb, NULL);
     return (errs == 0) ? RETURN_OK : RETURN_WARN;
 }
 
@@ -930,9 +932,9 @@ static LONG do_verifyrdb(ULONG ln, char **tok, UWORD ntok)
     UBYTE *fbuf = NULL, *dbuf = NULL;
     ULONG i, diff_count = 0, first_diff = 0xFFFFFFFFUL;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN)); return RETURN_ERROR; }
 
     path = kwarg(tok, ntok, "FILE");
@@ -944,15 +946,15 @@ static LONG do_verifyrdb(ULONG ln, char **tok, UWORD ntok)
     Seek(fh, 0, OFFSET_END);
     fsize = Seek(fh, 0, OFFSET_BEGINNING);
 
-    if (fsize != (LONG)s_st.bd->block_size) {
+    if (fsize != (LONG)s_st->bd->block_size) {
         Close(fh);
         DP_SNPRINTF(s_msg, GS(MSG_SCR_VERIFYRDB_SIZE_FMT),
-                (long)fsize, (unsigned long)s_st.bd->block_size);
+                (long)fsize, (unsigned long)s_st->bd->block_size);
         sc_err(ln, s_msg); return RETURN_ERROR;
     }
 
-    fbuf = (UBYTE *)AllocVec(s_st.bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
-    dbuf = (UBYTE *)AllocVec(s_st.bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
+    fbuf = (UBYTE *)AllocVec(s_st->bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
+    dbuf = (UBYTE *)AllocVec(s_st->bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
     if (!fbuf || !dbuf) {
         Close(fh);
         if (fbuf) FreeVec(fbuf);
@@ -966,12 +968,12 @@ static LONG do_verifyrdb(ULONG ln, char **tok, UWORD ntok)
     }
     Close(fh);
 
-    if (!BlockDev_ReadBlock(s_st.bd, s_st.rdb.block_num, dbuf)) {
+    if (!BlockDev_ReadBlock(s_st->bd, s_st->rdb.block_num, dbuf)) {
         FreeVec(fbuf); FreeVec(dbuf);
         sc_err(ln, GS(MSG_SCR_VERIFYRDB_DISK_ERR)); return RETURN_ERROR;
     }
 
-    for (i = 0; i < s_st.bd->block_size; i++) {
+    for (i = 0; i < s_st->bd->block_size; i++) {
         if (fbuf[i] != dbuf[i]) {
             if (first_diff == 0xFFFFFFFFUL) first_diff = i;
             diff_count++;
@@ -1002,7 +1004,7 @@ static LONG do_verifyext(ULONG ln, char **tok, UWORD ntok)
     ULONG  bad_blocks = 0;
     UBYTE *fbuf = NULL, *dbuf = NULL;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
 
     path = kwarg(tok, ntok, "FILE");
@@ -1023,10 +1025,10 @@ static LONG do_verifyext(ULONG ln, char **tok, UWORD ntok)
     block_size = BE32R(hdr[3]);
     num_blocks = BE32R(hdr[4]);
 
-    if (block_size != s_st.bd->block_size) {
+    if (block_size != s_st->bd->block_size) {
         Close(fh);
         DP_SNPRINTF(s_msg, GS(MSG_SCR_VERIFYEXT_BSIZE_FMT),
-                (unsigned long)block_size, (unsigned long)s_st.bd->block_size);
+                (unsigned long)block_size, (unsigned long)s_st->bd->block_size);
         sc_err(ln, s_msg); return RETURN_ERROR;
     }
     if (num_blocks == 0 || num_blocks > 1024) {
@@ -1056,7 +1058,7 @@ static LONG do_verifyext(ULONG ln, char **tok, UWORD ntok)
             DP_SNPRINTF(s_msg, GS(MSG_SCR_VERIFYEXT_FILE_RERR_FMT), (unsigned long)disk_blk);
             sc_puts(s_msg); bad_blocks++; break;
         }
-        if (!BlockDev_ReadBlock(s_st.bd, disk_blk, dbuf)) {
+        if (!BlockDev_ReadBlock(s_st->bd, disk_blk, dbuf)) {
             DP_SNPRINTF(s_msg, GS(MSG_SCR_VERIFYEXT_DISK_RERR_FMT), (unsigned long)disk_blk);
             sc_puts(s_msg); bad_blocks++; continue;
         }
@@ -1101,25 +1103,25 @@ static LONG do_backup(ULONG ln, char **tok, UWORD ntok)
     BPTR   fh;
     LONG   rc = RETURN_ERROR;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN)); return RETURN_ERROR; }
 
     path = kwarg(tok, ntok, "FILE");
     if (!path || !path[0])
         { sc_err(ln, GS(MSG_SCR_BACKUP_NEED_FILE)); return RETURN_ERROR; }
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_BACKUP_DRYRUN_FMT), path);
         sc_puts(s_msg);
         return RETURN_OK;
     }
 
-    buf = (UBYTE *)AllocVec(s_st.bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
+    buf = (UBYTE *)AllocVec(s_st->bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
     if (!buf) return RETURN_ERROR;
 
-    if (!BlockDev_ReadBlock(s_st.bd, s_st.rdb.block_num, buf)) {
+    if (!BlockDev_ReadBlock(s_st->bd, s_st->rdb.block_num, buf)) {
         FreeVec(buf);
         sc_err(ln, GS(MSG_SCR_BACKUP_DISK_ERR)); return RETURN_ERROR;
     }
@@ -1129,11 +1131,11 @@ static LONG do_backup(ULONG ln, char **tok, UWORD ntok)
         FreeVec(buf);
         sc_err(ln, GS(MSG_SCR_BACKUP_CANT_CREATE)); return RETURN_ERROR;
     }
-    if (Write(fh, buf, (LONG)s_st.bd->block_size) != (LONG)s_st.bd->block_size) {
+    if (Write(fh, buf, (LONG)s_st->bd->block_size) != (LONG)s_st->bd->block_size) {
         sc_err(ln, GS(MSG_SCR_BACKUP_WRITE_ERR));
     } else {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_BACKUP_OK_FMT),
-                (unsigned long)s_st.rdb.block_num);
+                (unsigned long)s_st->rdb.block_num);
         sc_puts(s_msg);
         rc = RETURN_OK;
     }
@@ -1149,14 +1151,14 @@ static LONG do_backup(ULONG ln, char **tok, UWORD ntok)
 
 static void restore_reload_rdb(void)
 {
-    RDB_FreeCode(&s_st.rdb);
-    memset(&s_st.rdb, 0, sizeof(s_st.rdb));
-    if (!(sc_read_rdb(s_st.bd, &s_st.rdb) && s_st.rdb.valid))
-        s_st.rdb.valid = FALSE;
-    s_st.rdb_ready = TRUE;
-    s_st.dirty     = FALSE;
-    memset(&s_st.s_mbr, 0, sizeof(s_st.s_mbr));
-    MBR_Read(s_st.bd, &s_st.s_mbr);
+    RDB_FreeCode(&s_st->rdb);
+    memset(&s_st->rdb, 0, sizeof(s_st->rdb));
+    if (!(sc_read_rdb(s_st->bd, &s_st->rdb) && s_st->rdb.valid))
+        s_st->rdb.valid = FALSE;
+    s_st->rdb_ready = TRUE;
+    s_st->dirty     = FALSE;
+    memset(&s_st->s_mbr, 0, sizeof(s_st->s_mbr));
+    MBR_Read(s_st->bd, &s_st->s_mbr);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1172,7 +1174,7 @@ static LONG do_restore(ULONG ln, char **tok, UWORD ntok)
     LONG   fsize;
     LONG   rc = RETURN_ERROR;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
 
     path = kwarg(tok, ntok, "FILE");
@@ -1183,14 +1185,14 @@ static LONG do_restore(ULONG ln, char **tok, UWORD ntok)
     if (!fh) { sc_err(ln, GS(MSG_SCR_RESTORE_CANT_OPEN)); return RETURN_ERROR; }
     Seek(fh, 0, OFFSET_END);
     fsize = Seek(fh, 0, OFFSET_BEGINNING);
-    if (fsize != (LONG)s_st.bd->block_size) {
+    if (fsize != (LONG)s_st->bd->block_size) {
         Close(fh);
         DP_SNPRINTF(s_msg, GS(MSG_SCR_RESTORE_SIZE_FMT),
-                (long)fsize, (unsigned long)s_st.bd->block_size);
+                (long)fsize, (unsigned long)s_st->bd->block_size);
         sc_err(ln, s_msg); return RETURN_ERROR;
     }
 
-    buf = (UBYTE *)AllocVec(s_st.bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
+    buf = (UBYTE *)AllocVec(s_st->bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
     if (!buf) { Close(fh); return RETURN_ERROR; }
 
     if (Read(fh, buf, fsize) != fsize) {
@@ -1199,13 +1201,13 @@ static LONG do_restore(ULONG ln, char **tok, UWORD ntok)
     }
     Close(fh);
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         FreeVec(buf);
         sc_puts(GS(MSG_SCR_RESTORE_DRYRUN));
         return RETURN_OK;
     }
 
-    if (s_st.dirty)
+    if (s_st->dirty)
         sc_warn(ln, GS(MSG_SCR_PREV_UNSAVED));
 
     {
@@ -1216,7 +1218,7 @@ static LONG do_restore(ULONG ln, char **tok, UWORD ntok)
         if (BE32R(r->rdb_ID) == IDNAME_RIGIDDISK &&
             BE32R(r->rdb_RDBBlocksLo) < RDB_SCAN_LIMIT)
             home = BE32R(r->rdb_RDBBlocksLo);
-        if (!BlockDev_WriteBlock(s_st.bd, home, buf)) {
+        if (!BlockDev_WriteBlock(s_st->bd, home, buf)) {
             sc_err(ln, GS(MSG_SCR_RESTORE_WRITE_ERR));
         } else {
             sc_puts(GS(MSG_SCR_RESTORE_OK));
@@ -1243,35 +1245,35 @@ static LONG do_backupext(ULONG ln, char **tok, UWORD ntok)
     BPTR   fh;
     LONG   rc = RETURN_ERROR;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN)); return RETURN_ERROR; }
 
     path = kwarg(tok, ntok, "FILE");
     if (!path || !path[0])
         { sc_err(ln, GS(MSG_SCR_BACKUPEXT_NEED_FILE)); return RETURN_ERROR; }
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_BACKUPEXT_DRYRUN_FMT), path);
         sc_puts(s_msg);
         return RETURN_OK;
     }
 
-    buf = (UBYTE *)AllocVec(s_st.bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
+    buf = (UBYTE *)AllocVec(s_st->bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
     if (!buf) return RETURN_ERROR;
 
-    if (!BlockDev_ReadBlock(s_st.bd, s_st.rdb.block_num, buf)) {
+    if (!BlockDev_ReadBlock(s_st->bd, s_st->rdb.block_num, buf)) {
         FreeVec(buf);
         sc_err(ln, GS(MSG_SCR_BACKUPEXT_RDSK_ERR)); return RETURN_ERROR;
     }
     rdsk = (struct RigidDiskBlock *)buf;
-    block_lo  = s_st.rdb.rdb_block_lo;
+    block_lo  = s_st->rdb.rdb_block_lo;
     block_hi  = BE32R(rdsk->rdb_HighRDSKBlock);
     if (block_hi == RDB_END_MARK || block_hi < block_lo) block_hi = block_lo;
     /* never less than the PART/FSHD/LSEG/BADB blocks actually seen (some
        tools leave HighRDSKBlock at 0); RESTOREEXT caps at 1024 blocks */
-    { ULONG meta = RDB_LastMetaBlock(&s_st.rdb);
+    { ULONG meta = RDB_LastMetaBlock(&s_st->rdb);
       if (meta > block_hi) block_hi = meta;
       if (block_hi - block_lo + 1 > 1024) block_hi = block_lo + 1023; }
     num_blocks = block_hi - block_lo + 1;
@@ -1283,7 +1285,7 @@ static LONG do_backupext(ULONG ln, char **tok, UWORD ntok)
     }
 
     BE32W(hdr[0], ERDB_MAGIC);  BE32W(hdr[1], ERDB_VERSION);
-    BE32W(hdr[2], block_lo);    BE32W(hdr[3], s_st.bd->block_size);
+    BE32W(hdr[2], block_lo);    BE32W(hdr[3], s_st->bd->block_size);
     BE32W(hdr[4], num_blocks);  hdr[5] = hdr[6] = hdr[7] = 0;
     if (Write(fh, hdr, ERDB_HDR_SZ) != ERDB_HDR_SZ) {
         sc_err(ln, GS(MSG_SCR_BACKUPEXT_WRITE_ERR));
@@ -1292,10 +1294,10 @@ static LONG do_backupext(ULONG ln, char **tok, UWORD ntok)
 
     for (blk = block_lo; blk <= block_hi; blk++) {
         ULONG k;
-        if (!BlockDev_ReadBlock(s_st.bd, blk, buf))
-            for (k = 0; k < s_st.bd->block_size; k++) buf[k] = 0;
-        if (Write(fh, buf, (LONG)s_st.bd->block_size) !=
-            (LONG)s_st.bd->block_size) {
+        if (!BlockDev_ReadBlock(s_st->bd, blk, buf))
+            for (k = 0; k < s_st->bd->block_size; k++) buf[k] = 0;
+        if (Write(fh, buf, (LONG)s_st->bd->block_size) !=
+            (LONG)s_st->bd->block_size) {
             sc_err(ln, GS(MSG_SCR_BACKUPEXT_WRITE_ERR));
             goto backupext_done;
         }
@@ -1328,7 +1330,7 @@ static LONG do_restoreext(ULONG ln, char **tok, UWORD ntok)
     LONG   fsize;
     LONG   rc = RETURN_ERROR;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
 
     path = kwarg(tok, ntok, "FILE");
@@ -1350,11 +1352,11 @@ static LONG do_restoreext(ULONG ln, char **tok, UWORD ntok)
     block_size = BE32R(hdr[3]);
     num_blocks = BE32R(hdr[4]);
 
-    if (block_size != s_st.bd->block_size) {
+    if (block_size != s_st->bd->block_size) {
         Close(fh);
         DP_SNPRINTF(s_msg, GS(MSG_SCR_RESTOREEXT_BSIZE_FMT),
                 (unsigned long)block_size,
-                (unsigned long)s_st.bd->block_size);
+                (unsigned long)s_st->bd->block_size);
         sc_err(ln, s_msg); return RETURN_ERROR;
     }
     /* Cap before the size check: num_blocks * block_size is a 32-bit
@@ -1371,16 +1373,16 @@ static LONG do_restoreext(ULONG ln, char **tok, UWORD ntok)
 
     /* Does the backup belong to THIS disk?  Compare its RDSK geometry and
        product string with the open RDB; FORCE overrides a mismatch. */
-    if (s_st.rdb_ready && s_st.rdb.valid) {
+    if (s_st->rdb_ready && s_st->rdb.valid) {
         UBYTE *first = (UBYTE *)AllocVec(block_size, MEMF_PUBLIC | MEMF_CLEAR);
         if (first) {
             BOOL same = TRUE;
             if (Read(fh, first, (LONG)block_size) == (LONG)block_size)
-                same = RDB_SameDisk(first, &s_st.rdb);
+                same = RDB_SameDisk(first, &s_st->rdb);
             Seek(fh, ERDB_HDR_SZ, OFFSET_BEGINNING);
             FreeVec(first);
             if (!same) {
-                if (!s_st.force) {
+                if (!s_st->force) {
                     Close(fh);
                     sc_err(ln, GS(MSG_SCR_RESTOREEXT_OTHER_DISK)); return RETURN_ERROR;
                 }
@@ -1389,7 +1391,7 @@ static LONG do_restoreext(ULONG ln, char **tok, UWORD ntok)
         }
     }
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         Close(fh);
         DP_SNPRINTF(s_msg, GS(MSG_SCR_RESTOREEXT_DRYRUN_FMT),
                 (unsigned long)num_blocks, (unsigned long)block_lo);
@@ -1400,7 +1402,7 @@ static LONG do_restoreext(ULONG ln, char **tok, UWORD ntok)
     buf = (UBYTE *)AllocVec(block_size, MEMF_PUBLIC | MEMF_CLEAR);
     if (!buf) { Close(fh); return RETURN_ERROR; }
 
-    if (s_st.dirty)
+    if (s_st->dirty)
         sc_warn(ln, GS(MSG_SCR_PREV_UNSAVED));
 
     for (blk = 0; blk < num_blocks; blk++) {
@@ -1410,7 +1412,7 @@ static LONG do_restoreext(ULONG ln, char **tok, UWORD ntok)
             sc_err(ln, s_msg);
             goto restoreext_done;
         }
-        if (!BlockDev_WriteBlock(s_st.bd, block_lo + blk, buf)) {
+        if (!BlockDev_WriteBlock(s_st->bd, block_lo + blk, buf)) {
             DP_SNPRINTF(s_msg, GS(MSG_SCR_RESTOREEXT_WRITE_ERR_FMT),
                     (unsigned long)(block_lo + blk));
             sc_err(ln, s_msg);
@@ -1441,7 +1443,7 @@ static void script_move_progress(void *ud, ULONG done, ULONG total,
 static struct PartInfo *sc_find_part(const char *name_s, char *namebuf);
 
 /* Destination RDB for a cross-device clone (too big for the stack). */
-static struct RDBInfo s_clone_rdb;
+/* Destination RDB for a cross-disk clone (~14 KB; allocated only when needed). */
 
 static LONG do_partclone(ULONG ln, char **tok, UWORD ntok)
 {
@@ -1453,16 +1455,16 @@ static LONG do_partclone(ULONG ln, char **tok, UWORD ntok)
     BOOL  cross;
     LONG  rc = RETURN_ERROR;
 
-    if (!s_st.bd)  { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->bd)  { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN_INIT)); return RETURN_ERROR; }
     if (ntok < 2) { sc_puts(GS(MSG_SCR_PARTCLONE_USAGE)); return RETURN_ERROR; }
 
     src = sc_find_part(tok[1], sname);
     if (!src) { DP_SNPRINTF(s_msg, GS(MSG_PC_NOT_FOUND_FMT), sname);
                 sc_puts(s_msg); return RETURN_ERROR; }
-    if (!src->heads)   src->heads   = s_st.rdb.heads;
-    if (!src->sectors) src->sectors = s_st.rdb.sectors;
+    if (!src->heads)   src->heads   = s_st->rdb.heads;
+    if (!src->sectors) src->sectors = s_st->rdb.sectors;
 
     dst_s = kwarg(tok, ntok, "TO");
     if (!dst_s || !dst_s[0])
@@ -1470,7 +1472,7 @@ static LONG do_partclone(ULONG ln, char **tok, UWORD ntok)
     todev_s = kwarg(tok, ntok, "TODEV");
     cross = (todev_s && todev_s[0]) ? TRUE : FALSE;
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_PARTCLONE_DRYRUN_FMT),
                 src->drive_name, dst_s);
         sc_puts(s_msg);
@@ -1497,39 +1499,42 @@ static LONG do_partclone(ULONG ln, char **tok, UWORD ntok)
 
         dbd = BlockDev_Open(ddevname, dunit);
         if (!dbd) { sc_err(ln, GS(MSG_SCR_PARTCLONE_TODEV_ERR)); return RETURN_ERROR; }
-        memset(&s_clone_rdb, 0, sizeof(s_clone_rdb));
-        if (!sc_read_rdb(dbd, &s_clone_rdb) || !s_clone_rdb.valid) {
-            sc_err(ln, GS(MSG_SCR_PARTCLONE_NO_RDB_DEST));
+        drdb = (struct RDBInfo *)AllocVec(sizeof(*drdb), MEMF_PUBLIC | MEMF_CLEAR);
+        if (!drdb) {
+            sc_err(ln, GS(MSG_RDBC_OUT_OF_MEMORY));
             BlockDev_Close(dbd); return RETURN_ERROR;
         }
-        drdb = &s_clone_rdb;
+        if (!sc_read_rdb(dbd, drdb) || !drdb->valid) {
+            sc_err(ln, GS(MSG_SCR_PARTCLONE_NO_RDB_DEST));
+            FreeVec(drdb); BlockDev_Close(dbd); return RETURN_ERROR;
+        }
         { UWORD i, l; char tmp[32];
           strncpy(tmp, dst_s, 30); tmp[30] = 0;
           l = (UWORD)strlen(tmp); if (l && tmp[l-1] == ':') tmp[l-1] = 0;
-          for (i = 0; i < s_clone_rdb.num_parts; i++)
-              if (ci_eq(s_clone_rdb.parts[i].drive_name, tmp))
-                  { dst = &s_clone_rdb.parts[i]; break; }
+          for (i = 0; i < drdb->num_parts; i++)
+              if (ci_eq(drdb->parts[i].drive_name, tmp))
+                  { dst = &drdb->parts[i]; break; }
         }
     } else {
         char dname[32];
-        dbd  = s_st.bd;
-        drdb = &s_st.rdb;
+        dbd  = s_st->bd;
+        drdb = &s_st->rdb;
         dst  = sc_find_part(dst_s, dname);
     }
     if (!dst) { DP_SNPRINTF(s_msg, GS(MSG_PC_NOT_FOUND_FMT), dst_s);
                 sc_puts(s_msg); goto clone_cleanup; }
-    if (dbd == s_st.bd && src == dst)
+    if (dbd == s_st->bd && src == dst)
         { sc_puts(GS(MSG_PC_CLONE_SAME)); goto clone_cleanup; }
 
     err[0] = '\0';
-    if (!PartClone_PartToPart(s_st.bd, src, dbd, drdb, dst,
+    if (!PartClone_PartToPart(s_st->bd, src, dbd, drdb, dst,
                               script_move_progress, NULL, err, sizeof(err))) {
         sc_puts(err); goto clone_cleanup;
     }
     /* Bring the filesystem driver along if the destination lacks it. */
-    if (cross && PartClone_DestNeedsFS(&s_st.rdb, drdb, src->dos_type) == 1) {
+    if (cross && PartClone_DestNeedsFS(&s_st->rdb, drdb, src->dos_type) == 1) {
         char dt[16];
-        if (PartClone_CopyFS(&s_st.rdb, drdb, src->dos_type, err, sizeof(err))) {
+        if (PartClone_CopyFS(&s_st->rdb, drdb, src->dos_type, err, sizeof(err))) {
             FormatDosType(src->dos_type, dt);
             DP_SNPRINTF(s_msg, GS(MSG_PC_FS_COPIED_FMT), dt);
             sc_puts(s_msg);
@@ -1540,14 +1545,14 @@ static LONG do_partclone(ULONG ln, char **tok, UWORD ntok)
     sc_puts(GS(MSG_SCR_WRITING_RDB));
     if (!sc_write_rdb(dbd, drdb)) { sc_puts(GS(MSG_SCR_FAILED)); goto clone_cleanup; }
     sc_puts(GS(MSG_SCR_OK_DOT));
-    if (!cross) s_st.dirty = FALSE;
+    if (!cross) s_st->dirty = FALSE;
     DP_SNPRINTF(s_msg, GS(MSG_SCR_PARTCLONE_OK_FMT),
             src->drive_name, dst->drive_name);
     sc_puts(s_msg);
     rc = RETURN_OK;
 
 clone_cleanup:
-    if (cross && dbd) { RDB_FreeCode(&s_clone_rdb); BlockDev_Close(dbd); }
+    if (cross && dbd) { RDB_FreeCode(drdb); FreeVec(drdb); BlockDev_Close(dbd); }
     return rc;
 }
 
@@ -1564,11 +1569,11 @@ static LONG do_addfs(ULONG ln, char **tok, UWORD ntok)
     ULONG  stack_size = 4096;
     char   dtbuf[16];
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_INIT)); return RETURN_ERROR; }
-    if (s_st.rdb.num_fs >= MAX_FILESYSTEMS)
+    if (s_st->rdb.num_fs >= MAX_FILESYSTEMS)
         { sc_err(ln, GS(MSG_SCR_FS_TABLE_FULL)); return RETURN_ERROR; }
 
     /* TYPE (required) */
@@ -1596,7 +1601,7 @@ static LONG do_addfs(ULONG ln, char **tok, UWORD ntok)
         if (parse_dec_strict(v, &ss) && ss > 0) stack_size = ss;
     }
 
-    fi = &s_st.rdb.filesystems[s_st.rdb.num_fs];
+    fi = &s_st->rdb.filesystems[s_st->rdb.num_fs];
     memset(fi, 0, sizeof(*fi));
     fi->dos_type     = dostype;
     fi->version      = version;
@@ -1660,8 +1665,8 @@ static LONG do_addfs(ULONG ln, char **tok, UWORD ntok)
         }
     }
 
-    s_st.rdb.num_fs++;
-    s_st.dirty = TRUE;
+    s_st->rdb.num_fs++;
+    s_st->dirty = TRUE;
 
     FormatDosType(dostype, dtbuf);
     if (version)
@@ -1712,9 +1717,9 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
     BOOL  to_end, ok;
     BOOL  no_unmount = FALSE;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN_INIT)); return RETURN_ERROR; }
 
     /* Positional: tok[1] = drive, tok[2] = size.  Optional trailing
@@ -1731,8 +1736,8 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
     sizestr = tok[2];
 
     /* Find the partition. */
-    for (i = 0; i < s_st.rdb.num_parts; i++) {
-        if (ci_eq(s_st.rdb.parts[i].drive_name, name)) { pi = &s_st.rdb.parts[i]; break; }
+    for (i = 0; i < s_st->rdb.num_parts; i++) {
+        if (ci_eq(s_st->rdb.parts[i].drive_name, name)) { pi = &s_st->rdb.parts[i]; break; }
     }
     if (!pi) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_GROW_NOT_FOUND_FMT), name);
@@ -1751,8 +1756,8 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
     }
 
     /* Geometry (fall back to RDB geometry when the part fields are 0). */
-    heads    = pi->heads   > 0 ? pi->heads   : s_st.rdb.heads;
-    sectors  = pi->sectors > 0 ? pi->sectors : s_st.rdb.sectors;
+    heads    = pi->heads   > 0 ? pi->heads   : s_st->rdb.heads;
+    sectors  = pi->sectors > 0 ? pi->sectors : s_st->rdb.sectors;
     blks_cyl = heads * sectors;
     if (blks_cyl == 0) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_GROW_BAD_SIZE_FMT), sizestr);
@@ -1762,9 +1767,9 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
 
     /* Highest cylinder we may grow into: the disk end, capped by the start
        of any partition that begins after this one. */
-    gap_max = s_st.rdb.hi_cyl;
-    for (i = 0; i < s_st.rdb.num_parts; i++) {
-        struct PartInfo *ex = &s_st.rdb.parts[i];
+    gap_max = s_st->rdb.hi_cyl;
+    for (i = 0; i < s_st->rdb.num_parts; i++) {
+        struct PartInfo *ex = &s_st->rdb.parts[i];
         if (ex == pi) continue;
         if (ex->low_cyl > pi->high_cyl && ex->low_cyl - 1 < gap_max)
             gap_max = ex->low_cyl - 1;
@@ -1809,7 +1814,7 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
             pi->drive_name, (ULONG)old_hi, (ULONG)new_hi, szbuf);
     sc_puts(s_msg);
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         sc_puts(GS(MSG_SCR_GROW_DRYRUN));
         return RETURN_OK;
     }
@@ -1828,7 +1833,7 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
     if (!no_unmount) {
         DP_SNPRINTF(step, GS(MSG_GROW_PROG_UNMOUNTING_FMT), pi->drive_name);
         script_grow_progress(NULL, step);
-        if (!UnmountPartition(s_st.bd, pi->drive_name,
+        if (!UnmountPartition(s_st->bd, pi->drive_name,
                               script_grow_progress, NULL, umerr, sizeof(umerr))) {
             pi->high_cyl = old_hi;                 /* undo */
             DP_SNPRINTF(s_msg, GS(MSG_SCR_GROW_UNMOUNT_FAIL_FMT),
@@ -1840,15 +1845,15 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
 
     switch (fskind) {
         case GROW_FS_SFS:
-            ok = SFS_GrowPartition(s_st.bd, &s_st.rdb, pi, old_hi, 0,
+            ok = SFS_GrowPartition(s_st->bd, &s_st->rdb, pi, old_hi, 0,
                                    s_msg, script_grow_progress, NULL);
             break;
         case GROW_FS_PFS:
-            ok = PFS_GrowPartition(s_st.bd, &s_st.rdb, pi, old_hi,
+            ok = PFS_GrowPartition(s_st->bd, &s_st->rdb, pi, old_hi,
                                    s_msg, script_grow_progress, NULL);
             break;
         default:
-            ok = FFS_GrowPartition(s_st.bd, &s_st.rdb, pi, old_hi, 0,
+            ok = FFS_GrowPartition(s_st->bd, &s_st->rdb, pi, old_hi, 0,
                                    s_msg, script_grow_progress, NULL);
             break;
     }
@@ -1862,7 +1867,7 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
         /* Only remount if we unmounted; NOUNMOUNT only Inhibited (already
            released by the grow routine). */
         if (!no_unmount)
-            MountPartition(s_st.bd, pi, mnt, rmerr, sizeof(rmerr));
+            MountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr));
         DP_SNPRINTF(s_msg, GS(MSG_SCR_GROW_FAIL_FMT), diag);
         sc_puts(s_msg);
         return RETURN_ERROR;
@@ -1873,7 +1878,7 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
     sc_puts(GS(MSG_SCR_WRITING_RDB));
     /* Filesystem already resized on disk: retry once, then print the exact
        recovery (see cli.c) - the table must not stay out of step. */
-    if (!sc_write_rdb(s_st.bd, &s_st.rdb) && !sc_write_rdb(s_st.bd, &s_st.rdb)) {
+    if (!sc_write_rdb(s_st->bd, &s_st->rdb) && !sc_write_rdb(s_st->bd, &s_st->rdb)) {
         sc_puts(GS(MSG_SCR_FAILED));
         DP_SNPRINTF(s_msg, GS(MSG_CLI_RESIZE_RDBFAIL_FMT),
                     pi->drive_name,
@@ -1884,14 +1889,14 @@ static LONG do_grow(ULONG ln, char **tok, UWORD ntok)
         return RETURN_ERROR;
     }
     sc_puts(GS(MSG_SCR_OK_DOT));
-    s_st.dirty = FALSE;
+    s_st->dirty = FALSE;
 
     /* FFS can remount live (no reboot); SFS/PFS leave the volume inhibited.
        NOUNMOUNT always needs a reboot (handler still on the old DosEnvec). */
     if (fskind == GROW_FS_FFS && !no_unmount) {
         DP_SNPRINTF(step, GS(MSG_GROW_PROG_REMOUNTING_FMT), pi->drive_name);
         script_grow_progress(NULL, step);
-        if (MountPartition(s_st.bd, pi, mnt, rmerr, sizeof(rmerr))) {
+        if (MountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr))) {
             MaterializeVolume(mnt);
             DP_SNPRINTF(s_msg, GS(MSG_SCR_GROW_REMOUNTED_FMT), pi->drive_name);
             sc_puts(s_msg);
@@ -1938,9 +1943,9 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
     ULONG old_hi, new_hi;
     BOOL  to_min, ok, no_unmount = FALSE;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN_INIT)); return RETURN_ERROR; }
     if (ntok < 3) { sc_puts(GS(MSG_SHR_USAGE)); return RETURN_ERROR; }
     for (i = 3; i < ntok; i++)
@@ -1952,8 +1957,8 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
     if (nlen == 0) { sc_puts(GS(MSG_SHR_USAGE)); return RETURN_ERROR; }
     sizestr = tok[2];
 
-    for (i = 0; i < s_st.rdb.num_parts; i++)
-        if (ci_eq(s_st.rdb.parts[i].drive_name, name)) { pi = &s_st.rdb.parts[i]; break; }
+    for (i = 0; i < s_st->rdb.num_parts; i++)
+        if (ci_eq(s_st->rdb.parts[i].drive_name, name)) { pi = &s_st->rdb.parts[i]; break; }
     if (!pi) {
         DP_SNPRINTF(s_msg, GS(MSG_SHR_NOT_FOUND_FMT), name);
         sc_puts(s_msg);
@@ -1971,8 +1976,8 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
         return RETURN_ERROR;
     }
 
-    heads    = pi->heads   > 0 ? pi->heads   : s_st.rdb.heads;
-    sectors  = pi->sectors > 0 ? pi->sectors : s_st.rdb.sectors;
+    heads    = pi->heads   > 0 ? pi->heads   : s_st->rdb.heads;
+    sectors  = pi->sectors > 0 ? pi->sectors : s_st->rdb.sectors;
     blks_cyl = heads * sectors;
     ncyl     = pi->high_cyl - pi->low_cyl + 1;
     if (blks_cyl == 0 || ncyl == 0) {
@@ -1984,10 +1989,10 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
     sc_puts(GS(MSG_SHR_SCANNING));
     memset(&rep, 0, sizeof(rep)); scanerr[0] = '\0';
     if (!((fskind == GROW_FS_PFS)
-          ? PFS_ShrinkInfo(s_st.bd, &s_st.rdb, pi, &rep, scanerr)
+          ? PFS_ShrinkInfo(s_st->bd, &s_st->rdb, pi, &rep, scanerr)
           : (fskind == GROW_FS_SFS)
-          ? SFS_ShrinkInfo(s_st.bd, &s_st.rdb, pi, &rep, scanerr)
-          : FFS_ShrinkInfo(s_st.bd, &s_st.rdb, pi, &rep, scanerr))) {
+          ? SFS_ShrinkInfo(s_st->bd, &s_st->rdb, pi, &rep, scanerr)
+          : FFS_ShrinkInfo(s_st->bd, &s_st->rdb, pi, &rep, scanerr))) {
         DP_SNPRINTF(s_msg, GS(MSG_SHR_FAIL_FMT), scanerr);
         sc_puts(s_msg);
         return RETURN_ERROR;
@@ -2056,7 +2061,7 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
             pi->drive_name, (ULONG)old_hi, (ULONG)new_hi, szbuf);
     sc_puts(s_msg);
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         sc_puts(GS(MSG_SHR_DRYRUN));
         return RETURN_OK;
     }
@@ -2070,7 +2075,7 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
     if (!no_unmount) {
         DP_SNPRINTF(step, GS(MSG_GROW_PROG_UNMOUNTING_FMT), pi->drive_name);
         script_grow_progress(NULL, step);
-        if (!UnmountPartition(s_st.bd, pi->drive_name,
+        if (!UnmountPartition(s_st->bd, pi->drive_name,
                               script_grow_progress, NULL, umerr, sizeof(umerr))) {
             pi->high_cyl = old_hi;
             DP_SNPRINTF(s_msg, GS(MSG_SHR_UNMOUNT_FAIL_FMT),
@@ -2081,12 +2086,12 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
     }
 
     ok = (fskind == GROW_FS_PFS)
-         ? PFS_ShrinkPartition(s_st.bd, &s_st.rdb, pi, old_hi,
+         ? PFS_ShrinkPartition(s_st->bd, &s_st->rdb, pi, old_hi,
                                s_msg, script_grow_progress, NULL)
          : (fskind == GROW_FS_SFS)
-         ? SFS_ShrinkPartition(s_st.bd, &s_st.rdb, pi, old_hi,
+         ? SFS_ShrinkPartition(s_st->bd, &s_st->rdb, pi, old_hi,
                                s_msg, script_grow_progress, NULL)
-         : FFS_ShrinkPartition(s_st.bd, &s_st.rdb, pi, old_hi,
+         : FFS_ShrinkPartition(s_st->bd, &s_st->rdb, pi, old_hi,
                                s_msg, script_grow_progress, NULL);
 
     if (!ok) {
@@ -2094,7 +2099,7 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
         strncpy(diag, s_msg, sizeof(diag) - 1); diag[sizeof(diag) - 1] = '\0';
         pi->high_cyl = old_hi;
         if (!no_unmount)
-            MountPartition(s_st.bd, pi, mnt, rmerr, sizeof(rmerr));
+            MountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr));
         DP_SNPRINTF(s_msg, GS(MSG_SHR_FAIL_FMT), diag);
         sc_puts(s_msg);
         return RETURN_ERROR;
@@ -2104,7 +2109,7 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
     sc_puts(GS(MSG_SCR_WRITING_RDB));
     /* Filesystem already resized on disk: retry once, then print the exact
        recovery (see cli.c) - the table must not stay out of step. */
-    if (!sc_write_rdb(s_st.bd, &s_st.rdb) && !sc_write_rdb(s_st.bd, &s_st.rdb)) {
+    if (!sc_write_rdb(s_st->bd, &s_st->rdb) && !sc_write_rdb(s_st->bd, &s_st->rdb)) {
         sc_puts(GS(MSG_SCR_FAILED));
         DP_SNPRINTF(s_msg, GS(MSG_CLI_RESIZE_RDBFAIL_FMT),
                     pi->drive_name,
@@ -2115,14 +2120,14 @@ static LONG do_shrink(ULONG ln, char **tok, UWORD ntok)
         return RETURN_ERROR;
     }
     sc_puts(GS(MSG_SCR_OK_DOT));
-    s_st.dirty = FALSE;
+    s_st->dirty = FALSE;
 
     /* Live remount is FFS-only, same as GROW - PFS keeps its stale
        in-memory rootblock until a reboot. */
     if (fskind == GROW_FS_FFS && !no_unmount) {
         DP_SNPRINTF(step, GS(MSG_GROW_PROG_REMOUNTING_FMT), pi->drive_name);
         script_grow_progress(NULL, step);
-        if (MountPartition(s_st.bd, pi, mnt, rmerr, sizeof(rmerr))) {
+        if (MountPartition(s_st->bd, pi, mnt, rmerr, sizeof(rmerr))) {
             MaterializeVolume(mnt);
             DP_SNPRINTF(s_msg, GS(MSG_SHR_REMOUNTED_FMT), pi->drive_name);
             sc_puts(s_msg);
@@ -2160,9 +2165,9 @@ static LONG do_shrinkinfo(ULONG ln, char **tok, UWORD ntok)
     char  name[32];
     UWORD nlen, i;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN_INIT)); return RETURN_ERROR; }
     if (ntok < 2) { sc_puts(GS(MSG_SI_USAGE)); return RETURN_ERROR; }
 
@@ -2171,15 +2176,15 @@ static LONG do_shrinkinfo(ULONG ln, char **tok, UWORD ntok)
     if (nlen > 0 && name[nlen - 1] == ':') name[--nlen] = '\0';
     if (nlen == 0) { sc_puts(GS(MSG_SI_USAGE)); return RETURN_ERROR; }
 
-    for (i = 0; i < s_st.rdb.num_parts; i++)
-        if (ci_eq(s_st.rdb.parts[i].drive_name, name)) { pi = &s_st.rdb.parts[i]; break; }
+    for (i = 0; i < s_st->rdb.num_parts; i++)
+        if (ci_eq(s_st->rdb.parts[i].drive_name, name)) { pi = &s_st->rdb.parts[i]; break; }
     if (!pi) {
         DP_SNPRINTF(s_msg, GS(MSG_SI_NOT_FOUND_FMT), name);
         sc_puts(s_msg);
         return RETURN_ERROR;
     }
 
-    return ShrinkInfo_Run(s_st.bd, &s_st.rdb, pi, sc_si_emit, NULL);
+    return ShrinkInfo_Run(s_st->bd, &s_st->rdb, pi, sc_si_emit, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2208,9 +2213,9 @@ static struct PartInfo *sc_find_part(const char *name_s, char *namebuf)
     nlen = (UWORD)strlen(namebuf);
     if (nlen > 0 && namebuf[nlen - 1] == ':') namebuf[--nlen] = '\0';
     if (nlen == 0) return NULL;
-    for (i = 0; i < s_st.rdb.num_parts; i++)
-        if (ci_eq(s_st.rdb.parts[i].drive_name, namebuf))
-            return &s_st.rdb.parts[i];
+    for (i = 0; i < s_st->rdb.num_parts; i++)
+        if (ci_eq(s_st->rdb.parts[i].drive_name, namebuf))
+            return &s_st->rdb.parts[i];
     return NULL;
 }
 
@@ -2219,20 +2224,20 @@ static LONG do_partout(ULONG ln, char **tok, UWORD ntok)
     struct PartInfo *pi;
     char  name[32], err[128], dt[16];
 
-    if (!s_st.bd)  { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->bd)  { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN_INIT)); return RETURN_ERROR; }
     if (ntok < 3) { sc_puts(GS(MSG_SCR_PARTOUT_USAGE)); return RETURN_ERROR; }
 
     pi = sc_find_part(tok[1], name);
     if (!pi) { DP_SNPRINTF(s_msg, GS(MSG_PC_NOT_FOUND_FMT), name); sc_puts(s_msg); return RETURN_ERROR; }
-    if (!pi->heads)   pi->heads   = s_st.rdb.heads;
-    if (!pi->sectors) pi->sectors = s_st.rdb.sectors;
+    if (!pi->heads)   pi->heads   = s_st->rdb.heads;
+    if (!pi->sectors) pi->sectors = s_st->rdb.sectors;
 
-    if (s_st.dryrun) { sc_puts(GS(MSG_SCR_PARTOUT_DRYRUN)); return RETURN_OK; }
+    if (s_st->dryrun) { sc_puts(GS(MSG_SCR_PARTOUT_DRYRUN)); return RETURN_OK; }
 
     err[0] = '\0';
-    if (!PartClone_DumpToFile(s_st.bd, pi, tok[2],
+    if (!PartClone_DumpToFile(s_st->bd, pi, tok[2],
                               script_move_progress, NULL, err, sizeof(err))) {
         sc_puts(err); return RETURN_ERROR;
     }
@@ -2248,26 +2253,26 @@ static LONG do_partin(ULONG ln, char **tok, UWORD ntok)
     struct PartInfo *pi;
     char  name[32], err[128];
 
-    if (!s_st.bd)  { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->bd)  { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN_INIT)); return RETURN_ERROR; }
     if (ntok < 3) { sc_puts(GS(MSG_SCR_PARTIN_USAGE)); return RETURN_ERROR; }
 
     pi = sc_find_part(tok[2], name);
     if (!pi) { DP_SNPRINTF(s_msg, GS(MSG_PC_NOT_FOUND_FMT), name); sc_puts(s_msg); return RETURN_ERROR; }
 
-    if (s_st.dryrun) { sc_puts(GS(MSG_SCR_PARTIN_DRYRUN)); return RETURN_OK; }
+    if (s_st->dryrun) { sc_puts(GS(MSG_SCR_PARTIN_DRYRUN)); return RETURN_OK; }
 
     err[0] = '\0';
-    if (!PartClone_RestoreToPart(s_st.bd, &s_st.rdb, pi, tok[1],
+    if (!PartClone_RestoreToPart(s_st->bd, &s_st->rdb, pi, tok[1],
                                  script_move_progress, NULL, err, sizeof(err))) {
         sc_puts(err); return RETURN_ERROR;
     }
     script_grow_progress(NULL, GS(MSG_GROW_PROG_WRITING_RDB));
     sc_puts(GS(MSG_SCR_WRITING_RDB));
-    if (!sc_write_rdb(s_st.bd, &s_st.rdb)) { sc_puts(GS(MSG_SCR_FAILED)); return RETURN_ERROR; }
+    if (!sc_write_rdb(s_st->bd, &s_st->rdb)) { sc_puts(GS(MSG_SCR_FAILED)); return RETURN_ERROR; }
     sc_puts(GS(MSG_SCR_OK_DOT));
-    s_st.dirty = FALSE;
+    s_st->dirty = FALSE;
     DP_SNPRINTF(s_msg, GS(MSG_PC_RESTORE_OK_FMT), name, pi->drive_name);
     sc_puts(s_msg);
     return RETURN_OK;
@@ -2284,22 +2289,22 @@ static LONG do_clearrdb(ULONG ln)
     char   err[96];
     ULONG  zeroed = 0;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
 
     { char mn[160];
-      if (MountedPartitionsOnDevice(s_st.bd, mn, sizeof(mn))) {
-          DP_SNPRINTF(s_msg, GS(MSG_CLI_DST_MOUNTED_FMT), s_st.bd->devname,
-                      (unsigned long)s_st.bd->unit, mn);
+      if (MountedPartitionsOnDevice(s_st->bd, mn, sizeof(mn))) {
+          DP_SNPRINTF(s_msg, GS(MSG_CLI_DST_MOUNTED_FMT), s_st->bd->devname,
+                      (unsigned long)s_st->bd->unit, mn);
           sc_puts(s_msg);
-          if (!s_st.force) { sc_err(ln, GS(MSG_CLI_DST_MOUNTED_REFUSED)); return RETURN_ERROR; }
+          if (!s_st->force) { sc_err(ln, GS(MSG_CLI_DST_MOUNTED_REFUSED)); return RETURN_ERROR; }
       } }
 
-    ClearRDB_Plan(s_st.bd, s_st.rdb_ready ? &s_st.rdb : NULL, &s_st.s_mbr, &plan);
+    ClearRDB_Plan(s_st->bd, s_st->rdb_ready ? &s_st->rdb : NULL, &s_st->s_mbr, &plan);
     if (plan.superfloppy)    sc_puts(GS(MSG_CLI_CLEARRDB_SUPERFLOPPY));
     if (plan.tail_uncertain) sc_puts(GS(MSG_CLI_CLEARRDB_TAIL_NOTE));
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         snprintf(s_msg, sizeof(s_msg), GS(MSG_SCR_CLEARRDB_DRYRUN_FMT),
                  (unsigned long)(plan.head_blocks - 1),
                  plan.gpt ? GS(MSG_CLI_CLEARRDB_GPT) : "");
@@ -2307,7 +2312,7 @@ static LONG do_clearrdb(ULONG ln)
         return RETURN_OK;
     }
 
-    if (!ClearRDB_Run(s_st.bd, &plan, &zeroed, err)) {
+    if (!ClearRDB_Run(s_st->bd, &plan, &zeroed, err)) {
         snprintf(s_msg, sizeof(s_msg), GS(MSG_SCR_CLEARRDB_FAIL_FMT), err);
         sc_err(ln, s_msg);
         return RETURN_ERROR;
@@ -2315,10 +2320,10 @@ static LONG do_clearrdb(ULONG ln)
 
     /* The disk is blank now: drop the in-memory RDB/MBR so a following
        INIT NEW starts from nothing and a stray WRITE has nothing to put back. */
-    RDB_FreeCode(&s_st.rdb);
-    memset(&s_st.rdb, 0, sizeof(s_st.rdb));
-    memset(&s_st.s_mbr, 0, sizeof(s_st.s_mbr));
-    s_st.dirty = FALSE;
+    RDB_FreeCode(&s_st->rdb);
+    memset(&s_st->rdb, 0, sizeof(s_st->rdb));
+    memset(&s_st->s_mbr, 0, sizeof(s_st->s_mbr));
+    s_st->dirty = FALSE;
 
     snprintf(s_msg, sizeof(s_msg), GS(MSG_SCR_CLEARRDB_OK_FMT),
              (unsigned long)(plan.head_blocks - 1),
@@ -2341,9 +2346,9 @@ static LONG do_zeropart(ULONG ln, char **tok, UWORD ntok)
     struct PartInfo *pi = NULL;
     BOOL ok;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN_INIT)); return RETURN_ERROR; }
 
     v = kwarg(tok, ntok, "NAME");
@@ -2359,9 +2364,9 @@ static LONG do_zeropart(ULONG ln, char **tok, UWORD ntok)
         return RETURN_ERROR;
     }
 
-    for (i = 0; i < s_st.rdb.num_parts; i++) {
-        if (ci_eq(s_st.rdb.parts[i].drive_name, name)) {
-            pi = &s_st.rdb.parts[i]; break;
+    for (i = 0; i < s_st->rdb.num_parts; i++) {
+        if (ci_eq(s_st->rdb.parts[i].drive_name, name)) {
+            pi = &s_st->rdb.parts[i]; break;
         }
     }
     if (!pi) {
@@ -2371,11 +2376,11 @@ static LONG do_zeropart(ULONG ln, char **tok, UWORD ntok)
         return RETURN_ERROR;
     }
 
-    heads   = pi->heads   > 0 ? pi->heads   : s_st.rdb.heads;
-    sectors = pi->sectors > 0 ? pi->sectors : s_st.rdb.sectors;
+    heads   = pi->heads   > 0 ? pi->heads   : s_st->rdb.heads;
+    sectors = pi->sectors > 0 ? pi->sectors : s_st->rdb.sectors;
     total_blocks = (pi->high_cyl - pi->low_cyl + 1) * heads * sectors;
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         snprintf(s_msg, sizeof(s_msg),
                  GS(MSG_SCR_ZEROPART_DRYRUN_FMT),
                  pi->drive_name, (unsigned long)total_blocks);
@@ -2383,7 +2388,7 @@ static LONG do_zeropart(ULONG ln, char **tok, UWORD ntok)
         return RETURN_OK;
     }
 
-    ok = PART_Zero(s_st.bd, &s_st.rdb, pi, err_buf, NULL, NULL);
+    ok = PART_Zero(s_st->bd, &s_st->rdb, pi, err_buf, NULL, NULL);
 
     if (ok) {
         snprintf(s_msg, sizeof(s_msg),
@@ -2405,23 +2410,23 @@ static LONG do_zeropart(ULONG ln, char **tok, UWORD ntok)
 
 static LONG do_write(ULONG ln)
 {
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_WRITE_NO_DEV)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_WRITE_NO_RDB)); return RETURN_ERROR; }
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_WRITE_DRYRUN_FMT),
-                (unsigned)s_st.rdb.num_parts,
-                (unsigned)s_st.rdb.num_fs);
+                (unsigned)s_st->rdb.num_parts,
+                (unsigned)s_st->rdb.num_fs);
         sc_puts(s_msg);
-        s_st.dirty = FALSE;
+        s_st->dirty = FALSE;
         return RETURN_OK;
     }
 
     DP_SNPRINTF(s_msg, GS(MSG_SCR_WRITE_ABOUT_FMT),
-            (unsigned)s_st.rdb.num_parts,
-            (unsigned)s_st.rdb.num_fs);
+            (unsigned)s_st->rdb.num_parts,
+            (unsigned)s_st->rdb.num_fs);
     sc_puts(s_msg);
     if (!sc_ask_yn(GS(MSG_SCR_WRITE_ASK))) {
         sc_puts(GS(MSG_SCR_ABORTED));
@@ -2429,22 +2434,22 @@ static LONG do_write(ULONG ln)
     }
 
     sc_puts(GS(MSG_SCR_WRITING_RDB));
-    if (!sc_write_rdb(s_st.bd, &s_st.rdb)) {
+    if (!sc_write_rdb(s_st->bd, &s_st->rdb)) {
         sc_puts(GS(MSG_SCR_FAILED));
         return RETURN_ERROR;
     }
     sc_puts(GS(MSG_SCR_OK_DOT));
-    s_st.dirty = FALSE;
+    s_st->dirty = FALSE;
 
     /* Quick-format any partition that was given a VOLNAME: internal
        formatter by default, OS formatter with SAFE (see nativefmt.h). */
     {
         UWORD i;
-        for (i = 0; i < s_st.rdb.num_parts; i++) {
-            struct PartInfo *pi = &s_st.rdb.parts[i];
+        for (i = 0; i < s_st->rdb.num_parts; i++) {
+            struct PartInfo *pi = &s_st->rdb.parts[i];
             char err[200], mounted[40], note[240];
             if (!pi->want_format || pi->volume_name[0] == '\0') continue;
-            if (Format_Partition(s_st.bd, &s_st.rdb, pi, pi->format_safe != 0,
+            if (Format_Partition(s_st->bd, &s_st->rdb, pi, pi->format_safe != 0,
                                  mounted, err, sizeof(err), note, sizeof(note))) {
                 DP_SNPRINTF(s_msg, GS(MSG_SCR_FORMATTED_FMT),
                         mounted[0] ? mounted : pi->drive_name,
@@ -2465,23 +2470,23 @@ static LONG do_write(ULONG ln)
     /* Unmount partitions deleted since the last WRITE (skip names re-added). */
     {
         UWORD u, k;
-        for (u = 0; u < s_st.unmount_count; u++) {
-            const char *nm = s_st.unmount_names[u];
+        for (u = 0; u < s_st->unmount_count; u++) {
+            const char *nm = s_st->unmount_names[u];
             BOOL re_added = FALSE;
             char err[80];
             if (!nm[0]) continue;
-            for (k = 0; k < s_st.rdb.num_parts; k++)
-                if (ci_eq(s_st.rdb.parts[k].drive_name, nm)) { re_added = TRUE; break; }
+            for (k = 0; k < s_st->rdb.num_parts; k++)
+                if (ci_eq(s_st->rdb.parts[k].drive_name, nm)) { re_added = TRUE; break; }
             if (re_added) continue;
             err[0] = '\0';
-            if (UnmountPartition(s_st.bd, nm, NULL, NULL, err, sizeof(err)))
+            if (UnmountPartition(s_st->bd, nm, NULL, NULL, err, sizeof(err)))
                 DP_SNPRINTF(s_msg, GS(MSG_SCR_UNMOUNTED_FMT), nm);
             else
                 DP_SNPRINTF(s_msg, GS(MSG_SCR_STILL_MOUNTED_FMT),
                         nm, err);
             sc_puts(s_msg);
         }
-        s_st.unmount_count = 0;
+        s_st->unmount_count = 0;
     }
     return RETURN_OK;
 }
@@ -2526,11 +2531,11 @@ static LONG do_imageout(ULONG ln, char **tok, UWORD ntok)
     char  errbuf[160];
     BOOL  ok;
 
-    if (!s_st.bd) { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
+    if (!s_st->bd) { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
     path = kwarg(tok, ntok, "FILE");
     if (!path) { sc_err(ln, GS(MSG_SCR_IMAGEOUT_NEED_FILE)); return RETURN_ERROR; }
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_IMAGEOUT_DRYRUN_FMT), path);
         sc_puts(s_msg);
         return RETURN_OK;
@@ -2541,7 +2546,7 @@ static LONG do_imageout(ULONG ln, char **tok, UWORD ntok)
     s_prog_pct = 0;
     s_prog_blocks = 0;
     errbuf[0] = '\0';
-    ok = ImageCopy_DiskToFile(s_st.bd, path, 0,
+    ok = ImageCopy_DiskToFile(s_st->bd, path, 0,
                               script_prog_cb, NULL,
                               errbuf, sizeof(errbuf));
     if (!ok) {
@@ -2560,11 +2565,11 @@ static LONG do_imagein(ULONG ln, char **tok, UWORD ntok)
     char  errbuf[160];
     BOOL  ok;
 
-    if (!s_st.bd) { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
+    if (!s_st->bd) { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
     path = kwarg(tok, ntok, "FILE");
     if (!path) { sc_err(ln, GS(MSG_SCR_IMAGEIN_NEED_FILE)); return RETURN_ERROR; }
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_IMAGEIN_DRYRUN_FMT), path);
         sc_puts(s_msg);
         return RETURN_OK;
@@ -2579,16 +2584,16 @@ static LONG do_imagein(ULONG ln, char **tok, UWORD ntok)
     DP_SNPRINTF(s_msg, GS(MSG_SCR_READING_IMAGE_FMT), path);
     sc_puts(s_msg);
     { char mn[160];
-      if (MountedPartitionsOnDevice(s_st.bd, mn, sizeof(mn))) {
-          DP_SNPRINTF(s_msg, GS(MSG_CLI_DST_MOUNTED_FMT), s_st.bd->devname,
-                      (unsigned long)s_st.bd->unit, mn);
+      if (MountedPartitionsOnDevice(s_st->bd, mn, sizeof(mn))) {
+          DP_SNPRINTF(s_msg, GS(MSG_CLI_DST_MOUNTED_FMT), s_st->bd->devname,
+                      (unsigned long)s_st->bd->unit, mn);
           sc_puts(s_msg);
-          if (!s_st.force) { sc_err(ln, GS(MSG_CLI_DST_MOUNTED_REFUSED)); return RETURN_ERROR; }
+          if (!s_st->force) { sc_err(ln, GS(MSG_CLI_DST_MOUNTED_REFUSED)); return RETURN_ERROR; }
       } }
     s_prog_pct = 0;
     s_prog_blocks = 0;
     errbuf[0] = '\0';
-    ok = ImageCopy_FileToDisk(s_st.bd, path,
+    ok = ImageCopy_FileToDisk(s_st->bd, path,
                               script_prog_cb, NULL,
                               errbuf, sizeof(errbuf));
     if (!ok) {
@@ -2598,10 +2603,10 @@ static LONG do_imagein(ULONG ln, char **tok, UWORD ntok)
     }
     sc_puts(GS(MSG_SCR_DONE));
     /* Re-read RDB so subsequent INFO/etc. reflect what was just written. */
-    RDB_FreeCode(&s_st.rdb);
-    memset(&s_st.rdb, 0, sizeof(s_st.rdb));
-    if (sc_read_rdb(s_st.bd, &s_st.rdb) && s_st.rdb.valid)
-        s_st.rdb_ready = TRUE;
+    RDB_FreeCode(&s_st->rdb);
+    memset(&s_st->rdb, 0, sizeof(s_st->rdb));
+    if (sc_read_rdb(s_st->bd, &s_st->rdb) && s_st->rdb.valid)
+        s_st->rdb_ready = TRUE;
     return RETURN_OK;
 }
 
@@ -2619,13 +2624,13 @@ static LONG do_addmbr(ULONG ln, char **tok, UWORD ntok)
     BOOL        active = FALSE;
     char        typebuf[12];
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid)
+    if (!s_st->rdb_ready || !s_st->rdb.valid)
         { sc_err(ln, GS(MSG_SCR_NO_RDB_INIT)); return RETURN_ERROR; }
-    if (!s_st.s_mbr.valid)
+    if (!s_st->s_mbr.valid)
         { sc_err(ln, GS(MSG_SCR_ADDMBR_NO_MBR)); return RETURN_ERROR; }
-    if (s_st.rdb.heads == 0 || s_st.rdb.sectors == 0)
+    if (s_st->rdb.heads == 0 || s_st->rdb.sectors == 0)
         { sc_err(ln, GS(MSG_SCR_ADDMBR_GEO_ZERO)); return RETURN_ERROR; }
 
     /* TYPE= (required) */
@@ -2641,8 +2646,8 @@ static LONG do_addmbr(ULONG ln, char **tok, UWORD ntok)
 
     /* END= (required) - cylinder or +size */
     v = kwarg(tok, ntok, "END");
-    if (!v || !parse_high(v, lo_cyl, s_st.rdb.hi_cyl,
-                          s_st.rdb.heads, s_st.rdb.sectors, &hi_cyl))
+    if (!v || !parse_high(v, lo_cyl, s_st->rdb.hi_cyl,
+                          s_st->rdb.heads, s_st->rdb.sectors, &hi_cyl))
         { sc_err(ln, GS(MSG_SCR_ADDMBR_BAD_END)); return RETURN_ERROR; }
     if (hi_cyl < lo_cyl)
         { sc_err(ln, GS(MSG_SCR_ADDMBR_BAD_END)); return RETURN_ERROR; }
@@ -2652,11 +2657,11 @@ static LONG do_addmbr(ULONG ln, char **tok, UWORD ntok)
 
     /* Find a free MBR slot */
     for (slot = 0; slot < MBR_MAX_PARTS; slot++)
-        if (!s_st.s_mbr.parts[slot].present) break;
+        if (!s_st->s_mbr.parts[slot].present) break;
     if (slot >= MBR_MAX_PARTS)
         { sc_err(ln, GS(MSG_SCR_ADDMBR_FULL)); return RETURN_ERROR; }
     /* same rules as the GUI: RDB reserved area and RDB partitions too */
-    if (MBR_RangeConflicts(lo_cyl, hi_cyl, &s_st.rdb, &s_st.s_mbr, 0xFF))
+    if (MBR_RangeConflicts(lo_cyl, hi_cyl, &s_st->rdb, &s_st->s_mbr, 0xFF))
         { sc_err(ln, GS(MSG_SCR_ADDMBR_OVERLAP)); return RETURN_ERROR; }
 
     /* Overlap check */
@@ -2664,47 +2669,47 @@ static LONG do_addmbr(ULONG ln, char **tok, UWORD ntok)
         UBYTE ki;
         for (ki = 0; ki < MBR_MAX_PARTS; ki++) {
             ULONG elo, ehi;
-            if (!s_st.s_mbr.parts[ki].present) continue;
-            elo = MBR_LBAToCyl(s_st.s_mbr.parts[ki].lba_start,
-                                s_st.rdb.heads, s_st.rdb.sectors);
-            ehi = MBR_LBAToCyl(s_st.s_mbr.parts[ki].lba_start +
-                                s_st.s_mbr.parts[ki].lba_size - 1,
-                                s_st.rdb.heads, s_st.rdb.sectors);
+            if (!s_st->s_mbr.parts[ki].present) continue;
+            elo = MBR_LBAToCyl(s_st->s_mbr.parts[ki].lba_start,
+                                s_st->rdb.heads, s_st->rdb.sectors);
+            ehi = MBR_LBAToCyl(s_st->s_mbr.parts[ki].lba_start +
+                                s_st->s_mbr.parts[ki].lba_size - 1,
+                                s_st->rdb.heads, s_st->rdb.sectors);
             if (lo_cyl <= ehi && hi_cyl >= elo)
                 { sc_err(ln, GS(MSG_SCR_ADDMBR_OVERLAP)); return RETURN_ERROR; }
         }
     }
 
     /* Compute LBA */
-    cyl_secs  = s_st.rdb.heads * s_st.rdb.sectors;
+    cyl_secs  = s_st->rdb.heads * s_st->rdb.sectors;
     lba_start = lo_cyl * cyl_secs;
     lba_size  = (hi_cyl - lo_cyl + 1) * cyl_secs;
 
     /* Fill the slot */
-    s_st.s_mbr.parts[slot].present   = TRUE;
-    s_st.s_mbr.parts[slot].type      = mtype;
-    s_st.s_mbr.parts[slot].active    = active;
-    s_st.s_mbr.parts[slot].lba_start = lba_start;
-    s_st.s_mbr.parts[slot].lba_size  = lba_size;
-    snprintf(s_st.s_mbr.parts[slot].name, 8, "MBR%u", (unsigned)(slot + 1));
+    s_st->s_mbr.parts[slot].present   = TRUE;
+    s_st->s_mbr.parts[slot].type      = mtype;
+    s_st->s_mbr.parts[slot].active    = active;
+    s_st->s_mbr.parts[slot].lba_start = lba_start;
+    s_st->s_mbr.parts[slot].lba_size  = lba_size;
+    snprintf(s_st->s_mbr.parts[slot].name, 8, "MBR%u", (unsigned)(slot + 1));
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         MBR_TypeName(mtype, typebuf);
         DP_SNPRINTF(s_msg, GS(MSG_SCR_ADDMBR_DRYRUN_FMT),
-                s_st.s_mbr.parts[slot].name, typebuf, lo_cyl, hi_cyl);
+                s_st->s_mbr.parts[slot].name, typebuf, lo_cyl, hi_cyl);
         sc_puts(s_msg);
         /* Undo the slot fill so state stays consistent in dryrun */
-        memset(&s_st.s_mbr.parts[slot], 0, sizeof(s_st.s_mbr.parts[slot]));
-        snprintf(s_st.s_mbr.parts[slot].name, 8, "MBR%u", (unsigned)(slot + 1));
+        memset(&s_st->s_mbr.parts[slot], 0, sizeof(s_st->s_mbr.parts[slot]));
+        snprintf(s_st->s_mbr.parts[slot].name, 8, "MBR%u", (unsigned)(slot + 1));
         return RETURN_OK;
     }
 
-    if (!MBR_Write(s_st.bd, &s_st.s_mbr))
+    if (!MBR_Write(s_st->bd, &s_st->s_mbr))
         { sc_err(ln, GS(MSG_SCR_ADDMBR_WRITE_FAIL)); return RETURN_ERROR; }
 
     MBR_TypeName(mtype, typebuf);
     DP_SNPRINTF(s_msg, GS(MSG_SCR_ADDMBR_ADDED_FMT),
-            s_st.s_mbr.parts[slot].name, lo_cyl, hi_cyl,
+            s_st->s_mbr.parts[slot].name, lo_cyl, hi_cyl,
             typebuf, active ? "Active" : "");
     sc_puts(s_msg);
     return RETURN_OK;
@@ -2719,9 +2724,9 @@ static LONG do_delmbr(ULONG ln, char **tok, UWORD ntok)
     const char *v;
     UBYTE slot;
 
-    if (!s_st.bd)
+    if (!s_st->bd)
         { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.s_mbr.valid)
+    if (!s_st->s_mbr.valid)
         { sc_err(ln, GS(MSG_SCR_DELMBR_NO_MBR)); return RETURN_ERROR; }
 
     v = kwarg(tok, ntok, "NAME");
@@ -2732,26 +2737,26 @@ static LONG do_delmbr(ULONG ln, char **tok, UWORD ntok)
     {
         UBYTE i;
         for (i = 0; i < MBR_MAX_PARTS; i++) {
-            if (ci_eq(v, s_st.s_mbr.parts[i].name)) { slot = i; break; }
+            if (ci_eq(v, s_st->s_mbr.parts[i].name)) { slot = i; break; }
         }
     }
-    if (slot == 0xFF || !s_st.s_mbr.parts[slot].present) {
+    if (slot == 0xFF || !s_st->s_mbr.parts[slot].present) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_DELMBR_NOT_FOUND_FMT), v);
         sc_err(ln, s_msg);
         return RETURN_ERROR;
     }
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_DELMBR_DRYRUN_FMT), v);
         sc_puts(s_msg);
         return RETURN_OK;
     }
 
     /* Clear the slot and write */
-    memset(&s_st.s_mbr.parts[slot], 0, sizeof(s_st.s_mbr.parts[slot]));
-    snprintf(s_st.s_mbr.parts[slot].name, 8, "MBR%u", (unsigned)(slot + 1));
+    memset(&s_st->s_mbr.parts[slot], 0, sizeof(s_st->s_mbr.parts[slot]));
+    snprintf(s_st->s_mbr.parts[slot].name, 8, "MBR%u", (unsigned)(slot + 1));
 
-    if (!MBR_Write(s_st.bd, &s_st.s_mbr)) {
+    if (!MBR_Write(s_st->bd, &s_st->s_mbr)) {
         sc_err(ln, GS(MSG_SCR_DELMBR_WRITE_FAIL));
         return RETURN_ERROR;
     }
@@ -2772,34 +2777,34 @@ static LONG do_info(ULONG ln)
 
     (void)ln;
 
-    if (!s_st.rdb_ready || !s_st.rdb.valid) {
+    if (!s_st->rdb_ready || !s_st->rdb.valid) {
         sc_puts(GS(MSG_SCR_INFO_NO_RDB));
         return RETURN_OK;
     }
 
-    FormatSize((UQUAD)s_st.rdb.cylinders
-               * s_st.rdb.heads * s_st.rdb.sectors * 512UL, szbuf);
+    FormatSize((UQUAD)s_st->rdb.cylinders
+               * s_st->rdb.heads * s_st->rdb.sectors * 512UL, szbuf);
     DP_SNPRINTF(s_msg, GS(MSG_SCR_INFO_GEO_FMT),
-            (ULONG)s_st.rdb.cylinders,
-            (ULONG)s_st.rdb.heads,
-            (ULONG)s_st.rdb.sectors,
+            (ULONG)s_st->rdb.cylinders,
+            (ULONG)s_st->rdb.heads,
+            (ULONG)s_st->rdb.sectors,
             szbuf);
     sc_puts(s_msg);
 
-    if (s_st.rdb.lo_cyl > 0) {
+    if (s_st->rdb.lo_cyl > 0) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_INFO_RESERVED_FMT),
-                (ULONG)s_st.rdb.lo_cyl - 1);
+                (ULONG)s_st->rdb.lo_cyl - 1);
         sc_puts(s_msg);
     }
 
-    DP_SNPRINTF(s_msg, GS(MSG_SCR_INFO_PARTS_FMT), (unsigned)s_st.rdb.num_parts);
+    DP_SNPRINTF(s_msg, GS(MSG_SCR_INFO_PARTS_FMT), (unsigned)s_st->rdb.num_parts);
     sc_puts(s_msg);
 
-    for (i = 0; i < s_st.rdb.num_parts; i++) {
-        struct PartInfo *pi = &s_st.rdb.parts[i];
+    for (i = 0; i < s_st->rdb.num_parts; i++) {
+        struct PartInfo *pi = &s_st->rdb.parts[i];
         ULONG blks = (pi->heads > 0 && pi->sectors > 0)
                      ? pi->heads * pi->sectors
-                     : s_st.rdb.heads * s_st.rdb.sectors;
+                     : s_st->rdb.heads * s_st->rdb.sectors;
         FormatDosType(pi->dos_type, dtbuf);
         FormatSize((UQUAD)(pi->high_cyl - pi->low_cyl + 1) * blks * 512UL,
                    szbuf);
@@ -2810,11 +2815,11 @@ static LONG do_info(ULONG ln)
         sc_puts(s_msg);
     }
 
-    DP_SNPRINTF(s_msg, GS(MSG_SCR_INFO_FS_COUNT_FMT), (unsigned)s_st.rdb.num_fs);
+    DP_SNPRINTF(s_msg, GS(MSG_SCR_INFO_FS_COUNT_FMT), (unsigned)s_st->rdb.num_fs);
     sc_puts(s_msg);
 
-    for (i = 0; i < s_st.rdb.num_fs; i++) {
-        struct FSInfo *fi = &s_st.rdb.filesystems[i];
+    for (i = 0; i < s_st->rdb.num_fs; i++) {
+        struct FSInfo *fi = &s_st->rdb.filesystems[i];
         FormatDosType(fi->dos_type, dtbuf);
         if (fi->code_size > 0) {
             FormatSize((UQUAD)fi->code_size, szbuf);
@@ -2838,21 +2843,21 @@ static LONG do_info(ULONG ln)
     }
 
     /* MBR partitions (if present) */
-    if (s_st.s_mbr.valid) {
+    if (s_st->s_mbr.valid) {
         UBYTE mi;
-        UBYTE mcount = MBR_Count(&s_st.s_mbr);
+        UBYTE mcount = MBR_Count(&s_st->s_mbr);
         char  typebuf[12];
         DP_SNPRINTF(s_msg, GS(MSG_SCR_INFO_MBR_HDR_FMT), (unsigned)mcount);
         sc_puts(s_msg);
         for (mi = 0; mi < MBR_MAX_PARTS; mi++) {
-            struct MBRPart *mp = &s_st.s_mbr.parts[mi];
+            struct MBRPart *mp = &s_st->s_mbr.parts[mi];
             ULONG mlo, mhi;
             if (!mp->present) continue;
             MBR_TypeName(mp->type, typebuf);
             mlo = MBR_LBAToCyl(mp->lba_start,
-                                s_st.rdb.heads, s_st.rdb.sectors);
+                                s_st->rdb.heads, s_st->rdb.sectors);
             mhi = MBR_LBAToCyl(mp->lba_start + mp->lba_size - 1,
-                                s_st.rdb.heads, s_st.rdb.sectors);
+                                s_st->rdb.heads, s_st->rdb.sectors);
             DP_SNPRINTF(s_msg, GS(MSG_SCR_INFO_MBR_ROW_FMT),
                     mp->name, mlo, mhi, typebuf,
                     mp->active ? "Active" : "");
@@ -2869,12 +2874,12 @@ static LONG do_info(ULONG ln)
 
 static LONG do_close(ULONG ln)
 {
-    if (!s_st.bd) { sc_warn(ln, GS(MSG_SCR_WRITE_NO_DEV)); return RETURN_OK; }
-    if (s_st.dirty)
+    if (!s_st->bd) { sc_warn(ln, GS(MSG_SCR_WRITE_NO_DEV)); return RETURN_OK; }
+    if (s_st->dirty)
         sc_warn(ln, GS(MSG_SCR_CLOSE_UNSAVED));
-    RDB_FreeCode(&s_st.rdb);
-    BlockDev_Close(s_st.bd);
-    s_st.bd = NULL; s_st.rdb_ready = FALSE; s_st.dirty = FALSE;
+    RDB_FreeCode(&s_st->rdb);
+    BlockDev_Close(s_st->bd);
+    s_st->bd = NULL; s_st->rdb_ready = FALSE; s_st->dirty = FALSE;
     sc_puts(GS(MSG_SCR_DEVICE_CLOSED));
     return RETURN_OK;
 }
@@ -2887,7 +2892,7 @@ static LONG do_reboot(ULONG ln)
 {
     UWORD i;
 
-    if (s_st.dirty)
+    if (s_st->dirty)
         sc_warn(ln, GS(MSG_SCR_REBOOT_UNSAVED));
     if (!sc_ask_yn(GS(MSG_SCR_REBOOT_ASK))) {
         sc_puts(GS(MSG_SCR_REBOOT_SKIPPED));
@@ -2915,14 +2920,14 @@ static LONG do_mountlist(ULONG ln, char **tok, UWORD ntok)
     BPTR  fh;
     const char *dn;
 
-    if (!s_st.bd) { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
-    if (!s_st.rdb_ready || !s_st.rdb.valid) {
+    if (!s_st->bd) { sc_err(ln, GS(MSG_SCR_NO_DEV_OPEN)); return RETURN_ERROR; }
+    if (!s_st->rdb_ready || !s_st->rdb.valid) {
         sc_err(ln, GS(MSG_SCR_NO_RDB_OPEN)); return RETURN_ERROR;
     }
     path = kwarg(tok, ntok, "FILE");
     if (!path) { sc_err(ln, GS(MSG_SCR_MOUNTLIST_NEED_FILE)); return RETURN_ERROR; }
 
-    if (s_st.dryrun) {
+    if (s_st->dryrun) {
         DP_SNPRINTF(s_msg, GS(MSG_SCR_MOUNTLIST_DRYRUN_FMT), path);
         sc_puts(s_msg);
         return RETURN_OK;
@@ -2937,8 +2942,8 @@ static LONG do_mountlist(ULONG ln, char **tok, UWORD ntok)
         sc_err(ln, s_msg);
         return RETURN_ERROR;
     }
-    dn = (s_st.bd->backend == BD_DEVICE) ? s_st.bd->devname : NULL;
-    if (!MountList_Write(fh, &s_st.rdb, dn, s_st.bd->unit, NULL)) {
+    dn = (s_st->bd->backend == BD_DEVICE) ? s_st->bd->devname : NULL;
+    if (!MountList_Write(fh, &s_st->rdb, dn, s_st->bd->unit, NULL)) {
         Close(fh);
         sc_err(ln, GS(MSG_SCR_MOUNTLIST_WRITE_ERR));
         return RETURN_ERROR;
@@ -3005,13 +3010,18 @@ LONG script_run(const char *filename, BOOL dryrun, BOOL force)
     LONG  rc  = RETURN_OK;
     BOOL  eof = FALSE;
 
-    memset(&s_st, 0, sizeof(s_st));
-    s_st.force  = force;
-    s_st.dryrun = dryrun;
+    s_st = (struct ScriptState *)AllocVec(sizeof(*s_st), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!s_st) {
+        sc_puts(GS(MSG_CLI_OUT_OF_MEMORY));
+        return RETURN_ERROR;
+    }
+    s_st->force  = force;
+    s_st->dryrun = dryrun;
 
     fh = Open((STRPTR)filename, MODE_OLDFILE);
     if (!fh) {
         PrintFault(IoErr(), (STRPTR)GS(MSG_SCR_PRINTFAULT_HDR));
+        FreeVec(s_st); s_st = NULL;
         return RETURN_ERROR;
     }
 
@@ -3027,13 +3037,14 @@ LONG script_run(const char *filename, BOOL dryrun, BOOL force)
 
     Close(fh);
 
-    if (s_st.bd) {
-        if (s_st.dirty)
+    if (s_st->bd) {
+        if (s_st->dirty)
             sc_puts(GS(MSG_SCR_ENDED_UNSAVED));
-        RDB_FreeCode(&s_st.rdb);
-        BlockDev_Close(s_st.bd);
+        RDB_FreeCode(&s_st->rdb);
+        BlockDev_Close(s_st->bd);
     }
 
     sc_puts(rc == RETURN_OK ? GS(MSG_SCR_COMPLETED) : GS(MSG_SCR_ABORTED_RUN));
+    FreeVec(s_st); s_st = NULL;
     return rc;
 }

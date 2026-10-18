@@ -113,28 +113,47 @@ static BOOL pcp_devname_eq_ci(const char *a, const char *b)
     return (BOOL)(*a == '\0' && *b == '\0');
 }
 
-static BOOL pcp_pick_dest_disk(char *devname_out, ULONG *unit_out)
+/* Device/unit lists are ~13 KB, so they are allocated per call rather
+   than kept resident. */
+struct pcp_pick_dest_disk_scratch {
+    struct DevNameList dn;
+    struct UnitList    ul;
+};
+
+static BOOL pcp_pick_dest_disk_body(struct pcp_pick_dest_disk_scratch *sc,
+                      char *devname_out, ULONG *unit_out)
 {
-    static struct DevNameList dn;
-    static struct UnitList    ul;
+    struct DevNameList *dn = &sc->dn;
+    struct UnitList    *ul = &sc->ul;
     static char               manual[64];
     WORD name_idx;
 
-    Devices_Scan(&dn);
+    Devices_Scan(dn);
     for (;;) {
         const char *devname;
         WORD        unit_idx;
-        name_idx = DiskSelect_PickDeviceName(&dn, manual, FALSE);
+        name_idx = DiskSelect_PickDeviceName(dn, manual, FALSE);
         if (name_idx == -1 || name_idx == DISKSEL_EXIT) return FALSE;
-        devname = (name_idx == DISKSEL_MANUAL) ? manual : dn.names[name_idx];
-        if (!DiskSelect_ProbeUnits(devname, &ul)) continue;
-        unit_idx = DiskSelect_PickUnit(devname, &ul);
+        devname = (name_idx == DISKSEL_MANUAL) ? manual : dn->names[name_idx];
+        if (!DiskSelect_ProbeUnits(devname, ul)) continue;
+        unit_idx = DiskSelect_PickUnit(devname, ul);
         if (unit_idx == DISKSEL_EXIT) return FALSE;
         if (unit_idx < 0) continue;
         strncpy(devname_out, devname, 63); devname_out[63] = '\0';
-        *unit_out = ul.entries[unit_idx].unit;
+        *unit_out = ul->entries[unit_idx].unit;
         return TRUE;
     }
+}
+
+static BOOL pcp_pick_dest_disk(char *devname_out, ULONG *unit_out)
+{
+    struct pcp_pick_dest_disk_scratch *sc =
+        (struct pcp_pick_dest_disk_scratch *)AllocVec(sizeof(*sc), MEMF_PUBLIC | MEMF_CLEAR);
+    BOOL ok;
+    if (!sc) return FALSE;
+    ok = pcp_pick_dest_disk_body(sc, devname_out, unit_out);
+    FreeVec(sc);
+    return ok;
 }
 
 static void pcp_msg(struct Window *win, const char *title, const char *body)
@@ -148,15 +167,14 @@ static void pcp_msg(struct Window *win, const char *title, const char *body)
 
 /* ---- destination-partition list picker ---- */
 /* Returns the selected partition index in drdb, or -1 on cancel. */
-static WORD pcp_pick_partition(struct Window *parent, struct RDBInfo *drdb,
-                               const char *devname)
+static WORD pcp_pick_partition_body(struct Window *parent, struct RDBInfo *drdb,
+                                    const char *devname, char (*rows)[64])
 {
     (void)parent;
     struct Screen *scr;
     APTR   vi = NULL;
     struct Gadget *glist = NULL, *gctx;
     struct Window *win = NULL;
-    static char rows[MAX_PARTITIONS + 1][64];
     static struct Node nodes[MAX_PARTITIONS + 1];
     struct List list;
     static char title[80];
@@ -314,6 +332,18 @@ static WORD pcp_pick_partition(struct Window *parent, struct RDBInfo *drdb,
     return result;
 }
 
+static WORD pcp_pick_partition(struct Window *parent, struct RDBInfo *drdb,
+                               const char *devname)
+{
+    char (*rows)[64] = (char (*)[64])AllocVec(sizeof(char[MAX_PARTITIONS + 1][64]),
+                                              MEMF_PUBLIC | MEMF_CLEAR);
+    WORD r;
+    if (!rows) return -1;
+    r = pcp_pick_partition_body(parent, drdb, devname, rows);
+    FreeVec(rows);
+    return r;
+}
+
 /* ---- progress adapter ---- */
 static void pcp_progress(void *ud, ULONG done, ULONG total, const char *phase)
 {
@@ -321,14 +351,14 @@ static void pcp_progress(void *ud, ULONG done, ULONG total, const char *phase)
     ProgressWin_Callback(ud, done, total);
 }
 
-BOOL copy_partition_to_disk(struct Window *win, struct BlockDev *bd,
-                            struct RDBInfo *rdb, struct PartInfo *src,
-                            const char *cur_devname, ULONG cur_unit)
+static BOOL pcp_copy_body(struct Window *win, struct BlockDev *bd,
+                          struct RDBInfo *rdb, struct PartInfo *src,
+                          const char *cur_devname, ULONG cur_unit,
+                          struct RDBInfo *drdb)
 {
     char   dest_devname[64];
     ULONG  dest_unit;
     struct BlockDev *dest = NULL;
-    static struct RDBInfo drdb;   /* large - keep out of the stack */
     WORD   dpi_idx;
     struct PartInfo *dpi;
     char   body[400], err[128];
@@ -348,12 +378,12 @@ BOOL copy_partition_to_disk(struct Window *win, struct BlockDev *bd,
         pcp_msg(win, GS(MSG_PCP_TITLE), GS(MSG_DC_BLOCKSIZE_MISMATCH));
         BlockDev_Close(dest); return FALSE;
     }
-    memset(&drdb, 0, sizeof(drdb));
-    if (!RDB_Read(dest, &drdb) || !drdb.valid) {
+    memset(drdb, 0, sizeof(*drdb));
+    if (!RDB_Read(dest, drdb) || !drdb->valid) {
         pcp_msg(win, GS(MSG_PCP_TITLE), GS(MSG_PCP_DEST_NO_RDB));
         BlockDev_Close(dest); return FALSE;
     }
-    if (drdb.chain_truncated) {
+    if (drdb->chain_truncated) {
         /* the clone rewrites the destination table; with entries missing
            from a damaged chain that would drop them for good */
         pcp_msg(win, GS(MSG_PCP_TITLE), GS(MSG_PCP_DEST_TRUNC));
@@ -364,8 +394,8 @@ BOOL copy_partition_to_disk(struct Window *win, struct BlockDev *bd,
     if (!src->heads)   src->heads   = rdb->heads;
     if (!src->sectors) src->sectors = rdb->sectors;
 
-    dpi_idx = pcp_pick_partition(win, &drdb, dest_devname);
-    if (dpi_idx < 0) { RDB_FreeCode(&drdb); BlockDev_Close(dest); return FALSE; }
+    dpi_idx = pcp_pick_partition(win, drdb, dest_devname);
+    if (dpi_idx < 0) { RDB_FreeCode(drdb); BlockDev_Close(dest); return FALSE; }
 
     if (dpi_idx == PCP_CREATE_NEW) {
         /* Create a partition in the DESTINATION disk's geometry, sized to
@@ -376,31 +406,31 @@ BOOL copy_partition_to_disk(struct Window *win, struct BlockDev *bd,
         ULONG ss    = src->sectors > 0 ? src->sectors : rdb->sectors;
         ULONG spb   = (src->block_size >= 1024) ? (src->block_size / 512) : 1;
         ULONG src_dev = (src->high_cyl - src->low_cyl + 1) * sh * ss * spb;
-        ULONG dbpc  = drdb.heads * drdb.sectors * spb;
+        ULONG dbpc  = drdb->heads * drdb->sectors * spb;
         ULONG cyl_span = dbpc ? (src_dev + dbpc - 1) / dbpc : 0;
         ULONG low;
         char  nm[32];          /* next_drive_name writes up to buf[31] */
 
-        if (drdb.num_parts >= MAX_PARTITIONS || cyl_span == 0) {
+        if (drdb->num_parts >= MAX_PARTITIONS || cyl_span == 0) {
             pcp_msg(win, GS(MSG_PCP_TITLE), GS(MSG_PCP_DEST_NO_PARTS));
-            RDB_FreeCode(&drdb); BlockDev_Close(dest); return FALSE;
+            RDB_FreeCode(drdb); BlockDev_Close(dest); return FALSE;
         }
-        if (!PartClone_FindGap(&drdb, cyl_span, drdb.heads, drdb.sectors, &low)) {
+        if (!PartClone_FindGap(drdb, cyl_span, drdb->heads, drdb->sectors, &low)) {
             DP_SNPRINTF(body, GS(MSG_PC_NOGAP_FMT), (unsigned long)cyl_span);
             pcp_msg(win, GS(MSG_PCP_TITLE), body);
-            RDB_FreeCode(&drdb); BlockDev_Close(dest); return FALSE;
+            RDB_FreeCode(drdb); BlockDev_Close(dest); return FALSE;
         }
-        dpi = &drdb.parts[drdb.num_parts];
+        dpi = &drdb->parts[drdb->num_parts];
         memset(dpi, 0, sizeof(*dpi));
         /* Pick a device name free on the destination RDB AND not already
            mounted anywhere (checks the DosList) - a bare new disk would
            otherwise get "DH0" and clash with the running boot device. */
-        next_drive_name(&drdb, nm);
+        next_drive_name(drdb, nm);
         strncpy(dpi->drive_name, nm, sizeof(dpi->drive_name) - 1);
         dpi->low_cyl    = low;
         dpi->high_cyl   = low + cyl_span - 1;
-        dpi->heads      = drdb.heads;          /* destination disk geometry */
-        dpi->sectors    = drdb.sectors;
+        dpi->heads      = drdb->heads;          /* destination disk geometry */
+        dpi->sectors    = drdb->sectors;
         dpi->block_size = src->block_size;     /* match source's FS blocks   */
         dpi->dos_type   = src->dos_type;
         dpi->sectors_per_block = src->sectors_per_block;
@@ -408,21 +438,21 @@ BOOL copy_partition_to_disk(struct Window *win, struct BlockDev *bd,
         dpi->mask       = 0x7FFFFFFEUL;
         dpi->max_transfer = 0x0FFFFFFEUL;
         dpi->num_buffer = 30;
-        if (!PartClone_ValidateFootprint(&drdb, dpi->low_cyl, dpi->high_cyl,
+        if (!PartClone_ValidateFootprint(drdb, dpi->low_cyl, dpi->high_cyl,
                                          dpi->heads, dpi->sectors, -1,
                                          err, sizeof(err))) {
             pcp_msg(win, GS(MSG_PCP_TITLE), err);
-            RDB_FreeCode(&drdb); BlockDev_Close(dest); return FALSE;
+            RDB_FreeCode(drdb); BlockDev_Close(dest); return FALSE;
         }
-        drdb.num_parts++;
+        drdb->num_parts++;
     } else {
-        dpi = &drdb.parts[dpi_idx];
+        dpi = &drdb->parts[dpi_idx];
         /* self-clone guard (same disk + same partition) */
         if (pcp_devname_eq_ci(dest_devname, cur_devname) &&
             dest_unit == cur_unit &&
             dpi->low_cyl == src->low_cyl && dpi->high_cyl == src->high_cyl) {
             pcp_msg(win, GS(MSG_PCP_TITLE), GS(MSG_PC_CLONE_SAME));
-            RDB_FreeCode(&drdb); BlockDev_Close(dest); return FALSE;
+            RDB_FreeCode(drdb); BlockDev_Close(dest); return FALSE;
         }
         /* overwrite in place: destination footprint unchanged (the engine
            checks it is large enough / exact-size for FFS). */
@@ -438,13 +468,13 @@ BOOL copy_partition_to_disk(struct Window *win, struct BlockDev *bd,
         es.es_TextFormat = (UBYTE *)body;
         es.es_GadgetFormat = (UBYTE *)GS(MSG_PCP_CONFIRM_GADGETS);
         if (EasyRequest(win, &es, NULL) != 1) {
-            RDB_FreeCode(&drdb); BlockDev_Close(dest); return FALSE;
+            RDB_FreeCode(drdb); BlockDev_Close(dest); return FALSE;
         }
     }
 
     /* If the destination disk has no driver for this filesystem, offer to
        copy it from the source RDB so the clone will actually mount. */
-    if (PartClone_DestNeedsFS(rdb, &drdb, src->dos_type) == 1) {
+    if (PartClone_DestNeedsFS(rdb, drdb, src->dos_type) == 1) {
         struct EasyStruct es;
         char dt[16];
         FormatDosType(src->dos_type, dt);
@@ -454,7 +484,7 @@ BOOL copy_partition_to_disk(struct Window *win, struct BlockDev *bd,
         es.es_TextFormat = (UBYTE *)body;
         es.es_GadgetFormat = (UBYTE *)GS(MSG_PCP_FS_ASK_GADGETS);
         if (EasyRequest(win, &es, NULL) == 1) {
-            if (!PartClone_CopyFS(rdb, &drdb, src->dos_type, err, sizeof(err)))
+            if (!PartClone_CopyFS(rdb, drdb, src->dos_type, err, sizeof(err)))
                 pcp_msg(win, GS(MSG_PCP_TITLE), err);   /* non-fatal; warn */
         }
     }
@@ -466,10 +496,10 @@ BOOL copy_partition_to_disk(struct Window *win, struct BlockDev *bd,
         DP_SNPRINTF(prog.title, GS(MSG_PCP_PROG_FMT), dpi->drive_name);
         ProgressWin_Open(&prog, prog.title);
         err[0] = '\0';
-        ok = PartClone_PartToPart(bd, src, dest, &drdb, dpi,
+        ok = PartClone_PartToPart(bd, src, dest, drdb, dpi,
                                   pcp_progress, &prog, err, sizeof(err));
         if (ok) {
-            if (!RDB_Write(dest, &drdb)) {
+            if (!RDB_Write(dest, drdb)) {
                 ok = FALSE;
                 strncpy(err, "RDB write failed", sizeof(err) - 1);
             } else {
@@ -487,7 +517,24 @@ BOOL copy_partition_to_disk(struct Window *win, struct BlockDev *bd,
         pcp_msg(win, GS(MSG_PCP_TITLE), body);
     }
 
-    RDB_FreeCode(&drdb);
+    RDB_FreeCode(drdb);
     BlockDev_Close(dest);
     return wrote;
+}
+
+BOOL copy_partition_to_disk(struct Window *win, struct BlockDev *bd,
+                            struct RDBInfo *rdb, struct PartInfo *src,
+                            const char *cur_devname, ULONG cur_unit)
+{
+    /* Destination RDB (~14 KB) lives only for the duration of the copy. */
+    struct RDBInfo *drdb = (struct RDBInfo *)AllocVec(sizeof(*drdb),
+                                                      MEMF_PUBLIC | MEMF_CLEAR);
+    BOOL ok;
+    if (!drdb) {
+        pcp_msg(win, GS(MSG_PCP_TITLE), GS(MSG_IC_OUT_OF_MEMORY));
+        return FALSE;
+    }
+    ok = pcp_copy_body(win, bd, rdb, src, cur_devname, cur_unit, drdb);
+    FreeVec(drdb);
+    return ok;
 }

@@ -3990,5 +3990,6 @@ cleanup:
     }
     if (rdb)  { RDB_FreeCode(rdb); FreeVec(rdb); }
     if (bd)   BlockDev_Close(bd);
+    vrdb_end();   /* list-dialog buffer, normally already released */
     return exit_req;
 }

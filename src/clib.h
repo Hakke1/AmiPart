@@ -4,7 +4,7 @@
  * -nostdlib build: this replaces <string.h>, <stdio.h>, <stdlib.h>.
  *
  * strlen/memset/memcpy/memmove: support/gcc8_c_support.c
- * sprintf/snprintf/strcmp/strncpy/strtoul/strtol: src/clib.c
+ * sprintf/snprintf/strcmp/strncpy/strcpy/strtoul/strtol: src/clib.c
  */
 
 #ifndef CLIB_H
@@ -44,6 +44,7 @@ int   snprintf(char *buf, size_t size, const char *fmt, ...);
     snprintf((arr), sizeof(arr) + DP_BUILD_BUG_IF(!DP_IS_ARRAY(arr)), __VA_ARGS__)
 int   strcmp(const char *a, const char *b);
 char *strncpy(char *dst, const char *src, size_t n);
+char *strcpy (char *dst, const char *src);
 
 unsigned long strtoul(const char *s, char **end, int base);
 long          strtol (const char *s, char **end, int base);

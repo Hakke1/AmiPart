@@ -153,7 +153,9 @@ BOOL cli_lowchip(void)   { return s_lowchip; }
 /* ------------------------------------------------------------------ */
 
 static char          outbuf[512];
-static struct RDBInfo s_rdb;          /* shared across all cmd_* functions */
+/* Shared across all cmd_* functions (~14 KB); allocated for the life of
+   cli_run() so it is not resident while the GUI runs. */
+static struct RDBInfo *s_rdb;
 
 /* ------------------------------------------------------------------ */
 /* Output helper                                                       */
@@ -576,52 +578,64 @@ static void print_dev_info(struct BlockDev *bd)
 /* LISTDEV                                                             */
 /* ------------------------------------------------------------------ */
 
-static struct DevNameList s_devnames;   /* ~5 KB - static avoids stack pressure */
+/* Device + unit lists (~13 KB together) - too big for the stack, so
+   allocated per call rather than kept resident. */
+struct listdev_scratch {
+    struct DevNameList dn;
+    struct UnitList    ul;
+};
 
 static LONG cmd_listdev(BOOL probe_units)
 {
     UWORD i;
+    struct listdev_scratch *sc =
+        (struct listdev_scratch *)AllocVec(sizeof(*sc), MEMF_PUBLIC | MEMF_CLEAR);
+    struct DevNameList *dn;
 
-    Devices_Scan(&s_devnames);
+    if (!sc) { cli_puts(GS(MSG_CLI_OUT_OF_MEMORY)); return RETURN_ERROR; }
+    dn = &sc->dn;
 
-    if (s_devnames.count == 0) {
+    Devices_Scan(dn);
+
+    if (dn->count == 0) {
         cli_puts(GS(MSG_CLI_NO_BLOCK_DEVS));
+        FreeVec(sc);
         return RETURN_OK;
     }
 
-    DP_SNPRINTF(outbuf, GS(MSG_CLI_BLOCK_DEVS_COUNT), (unsigned)s_devnames.count);
+    DP_SNPRINTF(outbuf, GS(MSG_CLI_BLOCK_DEVS_COUNT), (unsigned)dn->count);
     cli_puts(outbuf);
 
-    for (i = 0; i < s_devnames.count; i++) {
+    for (i = 0; i < dn->count; i++) {
 
         /* The host scan pre-formats display[]; the Amiga scan leaves it
            empty (it is filled later, by the GUI, from font metrics). */
-        if (s_devnames.display[i][0])
-            DP_SNPRINTF(outbuf, "%s\n", s_devnames.display[i]);
-        else if (s_devnames.vers[i] > 0)
+        if (dn->display[i][0])
+            DP_SNPRINTF(outbuf, "%s\n", dn->display[i]);
+        else if (dn->vers[i] > 0)
             DP_SNPRINTF(outbuf, "%-32s v%u.%u\n",
-                    s_devnames.names[i],
-                    (unsigned)s_devnames.vers[i],
-                    (unsigned)s_devnames.revs[i]);
+                    dn->names[i],
+                    (unsigned)dn->vers[i],
+                    (unsigned)dn->revs[i]);
         else
-            DP_SNPRINTF(outbuf, "%s\n", s_devnames.names[i]);
+            DP_SNPRINTF(outbuf, "%s\n", dn->names[i]);
         cli_puts(outbuf);
 
         if (probe_units) {
-            static struct UnitList ul;
+            struct UnitList *ul = &sc->ul;
             UWORD j;
 
             DP_SNPRINTF(outbuf, GS(MSG_CLI_PROBING_UNITS),
-                    s_devnames.names[i]);
+                    dn->names[i]);
             cli_puts(outbuf);
 
-            Devices_GetUnitsForName(s_devnames.names[i], &ul, NULL, NULL);
+            Devices_GetUnitsForName(dn->names[i], ul, NULL, NULL);
 
-            if (ul.count == 0) {
+            if (ul->count == 0) {
                 cli_puts(GS(MSG_CLI_NO_UNITS_FOUND));
             } else {
-                for (j = 0; j < ul.count; j++) {
-                    DP_SNPRINTF(outbuf, "  %s\n", ul.entries[j].display);
+                for (j = 0; j < ul->count; j++) {
+                    DP_SNPRINTF(outbuf, "  %s\n", ul->entries[j].display);
                     cli_puts(outbuf);
                 }
             }
@@ -629,6 +643,7 @@ static LONG cmd_listdev(BOOL probe_units)
         }
     }
 
+    FreeVec(sc);
     return RETURN_OK;
 }
 
@@ -841,12 +856,12 @@ static LONG cmd_clearrdb(const char *devname, ULONG unit, BOOL force)
           if (!force) { cli_puts(GS(MSG_CLI_DST_MOUNTED_REFUSED)); BlockDev_Close(bd); return RETURN_ERROR; }
       } }
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    cli_read_rdb(bd, &s_rdb);           /* invalid is fine - still cleared */
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    cli_read_rdb(bd, s_rdb);           /* invalid is fine - still cleared */
     memset(&mbr, 0, sizeof(mbr));
     MBR_Read(bd, &mbr);
 
-    ClearRDB_Plan(bd, &s_rdb, &mbr, &plan);
+    ClearRDB_Plan(bd, s_rdb, &mbr, &plan);
     DP_SNPRINTF(outbuf, GS(MSG_CLI_CLEARRDB_PLAN_FMT),
                 (unsigned long)(plan.head_blocks - 1),
                 plan.gpt ? GS(MSG_CLI_CLEARRDB_GPT) : "", devname, unit);
@@ -856,7 +871,7 @@ static LONG cmd_clearrdb(const char *devname, ULONG unit, BOOL force)
 
     if (!ask_yn(GS(MSG_CLI_CLEARRDB_CONFIRM), force)) {
         cli_puts(GS(MSG_CLI_ABORTED_NO_CHANGES));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
     }
 
     ok = ClearRDB_Run(bd, &plan, &zeroed, err);
@@ -866,7 +881,7 @@ static LONG cmd_clearrdb(const char *devname, ULONG unit, BOOL force)
         DP_SNPRINTF(outbuf, GS(MSG_CLI_CLEARRDB_FAIL_FMT), err);
     cli_puts(outbuf);
 
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     BlockDev_Close(bd);
     return ok ? RETURN_OK : RETURN_ERROR;
 }
@@ -889,8 +904,8 @@ static LONG cmd_info(const char *devname, ULONG unit)
 
     print_dev_info(bd);
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_FOUND));
         /* Still classify block 0 - a PC/FAT CF card is a common guest.
            Geometry for the cylinder display comes from the device. */
@@ -928,23 +943,23 @@ static LONG cmd_info(const char *devname, ULONG unit)
         return RETURN_OK;
     }
 
-    FormatSize((UQUAD)s_rdb.cylinders * s_rdb.heads * s_rdb.sectors * 512UL, szbuf);
+    FormatSize((UQUAD)s_rdb->cylinders * s_rdb->heads * s_rdb->sectors * 512UL, szbuf);
     DP_SNPRINTF(outbuf, GS(MSG_CLI_INFO_GEOMETRY),
-            (ULONG)s_rdb.cylinders, (ULONG)s_rdb.heads,
-            (ULONG)s_rdb.sectors, szbuf);
+            (ULONG)s_rdb->cylinders, (ULONG)s_rdb->heads,
+            (ULONG)s_rdb->sectors, szbuf);
     cli_puts(outbuf);
     DP_SNPRINTF(outbuf, GS(MSG_CLI_INFO_RDB_BLOCKS),
-            s_rdb.rdb_block_lo, s_rdb.rdb_block_hi,
-            (ULONG)s_rdb.lo_cyl, (ULONG)s_rdb.hi_cyl);
+            s_rdb->rdb_block_lo, s_rdb->rdb_block_hi,
+            (ULONG)s_rdb->lo_cyl, (ULONG)s_rdb->hi_cyl);
     cli_puts(outbuf);
 
-    DP_SNPRINTF(outbuf, GS(MSG_CLI_INFO_PARTITIONS), (unsigned)s_rdb.num_parts);
+    DP_SNPRINTF(outbuf, GS(MSG_CLI_INFO_PARTITIONS), (unsigned)s_rdb->num_parts);
     cli_puts(outbuf);
-    for (i = 0; i < s_rdb.num_parts; i++) {
-        struct PartInfo *pi = &s_rdb.parts[i];
+    for (i = 0; i < s_rdb->num_parts; i++) {
+        struct PartInfo *pi = &s_rdb->parts[i];
         ULONG blks = (pi->heads > 0 && pi->sectors > 0)
                      ? pi->heads * pi->sectors
-                     : s_rdb.heads * s_rdb.sectors;
+                     : s_rdb->heads * s_rdb->sectors;
         FormatDosType(pi->dos_type, dtbuf);
         FormatSize((UQUAD)(pi->high_cyl - pi->low_cyl + 1) * blks * 512UL, szbuf);
         DP_SNPRINTF(outbuf, GS(MSG_CLI_INFO_PART_ROW),
@@ -954,10 +969,10 @@ static LONG cmd_info(const char *devname, ULONG unit)
         cli_puts(outbuf);
     }
 
-    DP_SNPRINTF(outbuf, GS(MSG_CLI_INFO_FILESYSTEMS), (unsigned)s_rdb.num_fs);
+    DP_SNPRINTF(outbuf, GS(MSG_CLI_INFO_FILESYSTEMS), (unsigned)s_rdb->num_fs);
     cli_puts(outbuf);
-    for (i = 0; i < s_rdb.num_fs; i++) {
-        struct FSInfo *fi = &s_rdb.filesystems[i];
+    for (i = 0; i < s_rdb->num_fs; i++) {
+        struct FSInfo *fi = &s_rdb->filesystems[i];
         FormatDosType(fi->dos_type, dtbuf);
         if (fi->code_size > 0) {
             FormatSize((UQUAD)fi->code_size, szbuf);
@@ -995,9 +1010,9 @@ static LONG cmd_info(const char *devname, ULONG unit)
                 ULONG mlo, mhi;
                 if (!mp->present) continue;
                 MBR_TypeName(mp->type, typebuf);
-                mlo = MBR_LBAToCyl(mp->lba_start, s_rdb.heads, s_rdb.sectors);
+                mlo = MBR_LBAToCyl(mp->lba_start, s_rdb->heads, s_rdb->sectors);
                 mhi = MBR_LBAToCyl(mp->lba_start + mp->lba_size - 1,
-                                    s_rdb.heads, s_rdb.sectors);
+                                    s_rdb->heads, s_rdb->sectors);
                 DP_SNPRINTF(outbuf, GS(MSG_CLI_INFO_MBR_ROW_FMT),
                         mp->name, mlo, mhi, typebuf,
                         mp->active ? "Active" : "");
@@ -1006,7 +1021,7 @@ static LONG cmd_info(const char *devname, ULONG unit)
         }
     }
 
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     BlockDev_Close(bd);
     return RETURN_OK;
 }
@@ -1028,8 +1043,8 @@ static LONG cmd_backup(const char *devname, ULONG unit, const char *path)
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_NOTHING_BACKUP));
         BlockDev_Close(bd);
         return RETURN_ERROR;
@@ -1038,9 +1053,9 @@ static LONG cmd_backup(const char *devname, ULONG unit, const char *path)
     buf = (UBYTE *)AllocVec(bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
     if (!buf) { cli_puts(GS(MSG_CLI_OUT_OF_MEMORY)); BlockDev_Close(bd); return RETURN_ERROR; }
 
-    DP_SNPRINTF(outbuf, GS(MSG_CLI_READING_RDB_BLOCK), s_rdb.block_num);
+    DP_SNPRINTF(outbuf, GS(MSG_CLI_READING_RDB_BLOCK), s_rdb->block_num);
     cli_puts(outbuf);
-    if (!BlockDev_ReadBlock(bd, s_rdb.block_num, buf)) {
+    if (!BlockDev_ReadBlock(bd, s_rdb->block_num, buf)) {
         cli_puts(GS(MSG_CLI_FAILED));
         goto backup_done;
     }
@@ -1058,7 +1073,7 @@ static LONG cmd_backup(const char *devname, ULONG unit, const char *path)
 
 backup_done:
     FreeVec(buf);
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     BlockDev_Close(bd);
     return rc;
 }
@@ -1079,8 +1094,8 @@ static LONG cmd_mountlist(const char *devname, ULONG unit, const char *path)
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_FOUND));
         BlockDev_Close(bd);
         return RETURN_ERROR;
@@ -1093,14 +1108,14 @@ static LONG cmd_mountlist(const char *devname, ULONG unit, const char *path)
         cli_puts(GS(MSG_CLI_FAILED_CREATE_FILE));
     } else {
         const char *dn = (bd->backend == BD_DEVICE) ? bd->devname : NULL;
-        if (MountList_Write(fh, &s_rdb, dn, bd->unit, NULL))
+        if (MountList_Write(fh, s_rdb, dn, bd->unit, NULL))
             { cli_puts(GS(MSG_CLI_OK)); rc = RETURN_OK; }
         else
             cli_puts(GS(MSG_CLI_FAILED_WRITE_ERROR));
         Close(fh);
     }
 
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     BlockDev_Close(bd);
     return rc;
 }
@@ -1192,8 +1207,8 @@ static LONG cmd_backupext(const char *devname, ULONG unit, const char *path)
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_NOTHING_BACKUP));
         BlockDev_Close(bd);
         return RETURN_ERROR;
@@ -1202,16 +1217,16 @@ static LONG cmd_backupext(const char *devname, ULONG unit, const char *path)
     buf = (UBYTE *)AllocVec(bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
     if (!buf) { cli_puts(GS(MSG_CLI_OUT_OF_MEMORY)); BlockDev_Close(bd); return RETURN_ERROR; }
 
-    if (!BlockDev_ReadBlock(bd, s_rdb.block_num, buf)) {
+    if (!BlockDev_ReadBlock(bd, s_rdb->block_num, buf)) {
         cli_puts(GS(MSG_CLI_CANNOT_READ_RDSK)); goto backupext_done;
     }
     rdsk = (struct RigidDiskBlock *)buf;
-    block_lo  = s_rdb.rdb_block_lo;
+    block_lo  = s_rdb->rdb_block_lo;
     block_hi  = BE32R(rdsk->rdb_HighRDSKBlock);
     if (block_hi == RDB_END_MARK || block_hi < block_lo) block_hi = block_lo;
     /* Some tools leave HighRDSKBlock at 0: never back up less than the
        PART/FSHD/LSEG/BADB blocks actually seen.  RESTOREEXT caps at 1024. */
-    { ULONG meta = RDB_LastMetaBlock(&s_rdb);
+    { ULONG meta = RDB_LastMetaBlock(s_rdb);
       if (meta > block_hi) block_hi = meta;
       if (block_hi - block_lo + 1 > 1024) block_hi = block_lo + 1023; }
     num_blocks = block_hi - block_lo + 1;
@@ -1249,7 +1264,7 @@ static LONG cmd_backupext(const char *devname, ULONG unit, const char *path)
 
 backupext_done:
     FreeVec(buf);
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     BlockDev_Close(bd);
     return rc;
 }
@@ -1319,9 +1334,9 @@ static LONG cmd_restoreext(const char *devname, ULONG unit,
         if (first) {
             BOOL same = TRUE;
             if (Read(fh, first, (LONG)block_size) == (LONG)block_size) {
-                if (cli_read_rdb(bd, &s_rdb) && s_rdb.valid)
-                    same = RDB_SameDisk(first, &s_rdb);
-                RDB_FreeCode(&s_rdb);
+                if (cli_read_rdb(bd, s_rdb) && s_rdb->valid)
+                    same = RDB_SameDisk(first, s_rdb);
+                RDB_FreeCode(s_rdb);
             }
             Seek(fh, ERDB_HDR_SZ, OFFSET_BEGINNING);
             if (!same) {
@@ -1332,9 +1347,9 @@ static LONG cmd_restoreext(const char *devname, ULONG unit,
                             (unsigned long)BE32R(r->rdb_Cylinders),
                             (unsigned long)BE32R(r->rdb_Heads),
                             (unsigned long)BE32R(r->rdb_Sectors), prod,
-                            (unsigned long)s_rdb.cylinders,
-                            (unsigned long)s_rdb.heads,
-                            (unsigned long)s_rdb.sectors, s_rdb.disk_product);
+                            (unsigned long)s_rdb->cylinders,
+                            (unsigned long)s_rdb->heads,
+                            (unsigned long)s_rdb->sectors, s_rdb->disk_product);
                 cli_puts(outbuf);
                 if (!ask_yn(GS(MSG_CLI_ASK_RESTORE_ANYWAY), force)) {
                     FreeVec(first);
@@ -1423,37 +1438,37 @@ static LONG cmd_addpart(const char *devname, ULONG unit, BOOL force,
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_RUN_INIT));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
-    if (s_rdb.num_parts >= MAX_PARTITIONS) {
+    if (s_rdb->num_parts >= MAX_PARTITIONS) {
         cli_puts(GS(MSG_CLI_PART_TABLE_FULL));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
-    if (!cli_parse_low(low_s, &s_rdb, &low)) {
+    if (!cli_parse_low(low_s, s_rdb, &low)) {
         cli_puts(GS(MSG_CLI_LOW_INVALID));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
-    if (!cli_parse_high(high_s, low, s_rdb.hi_cyl,
-                        s_rdb.heads, s_rdb.sectors, &high)) {
+    if (!cli_parse_high(high_s, low, s_rdb->hi_cyl,
+                        s_rdb->heads, s_rdb->sectors, &high)) {
         cli_puts(GS(MSG_CLI_HIGH_INVALID));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     if (low > high)
-        { cli_puts(GS(MSG_CLI_LOW_GT_HIGH)); RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR; }
-    if (low < s_rdb.lo_cyl) {
+        { cli_puts(GS(MSG_CLI_LOW_GT_HIGH)); RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR; }
+    if (low < s_rdb->lo_cyl) {
         DP_SNPRINTF(outbuf, GS(MSG_CLI_LOW_BELOW_RESERVED),
-                low, (ULONG)s_rdb.lo_cyl);
-        cli_puts(outbuf); RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+                low, (ULONG)s_rdb->lo_cyl);
+        cli_puts(outbuf); RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
-    if (high > s_rdb.hi_cyl) {
+    if (high > s_rdb->hi_cyl) {
         DP_SNPRINTF(outbuf, GS(MSG_CLI_HIGH_EXCEEDS_DISK),
-                high, (ULONG)s_rdb.hi_cyl);
-        cli_puts(outbuf); RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+                high, (ULONG)s_rdb->hi_cyl);
+        cli_puts(outbuf); RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
     {
         /* Overlap handling.  If our start cylinder is already inside an
@@ -1463,13 +1478,13 @@ static LONG cmd_addpart(const char *devname, ULONG unit, BOOL force,
          * was given, in which case the requested size must fit or we error. */
         struct PartInfo *clamp_ex = NULL;
         ULONG clamp_to = 0;
-        for (i = 0; i < s_rdb.num_parts; i++) {
-            struct PartInfo *ex = &s_rdb.parts[i];
+        for (i = 0; i < s_rdb->num_parts; i++) {
+            struct PartInfo *ex = &s_rdb->parts[i];
             if (low >= ex->low_cyl && low <= ex->high_cyl) {
                 DP_SNPRINTF(outbuf, GS(MSG_CLI_CYLS_OVERLAP),
                         low, high, ex->drive_name,
                         (ULONG)ex->low_cyl, (ULONG)ex->high_cyl);
-                cli_puts(outbuf); RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+                cli_puts(outbuf); RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
             }
             if (ex->low_cyl > low && ex->low_cyl <= high &&
                 (!clamp_ex || ex->low_cyl < clamp_to)) {
@@ -1482,7 +1497,7 @@ static LONG cmd_addpart(const char *devname, ULONG unit, BOOL force,
                 DP_SNPRINTF(outbuf, GS(MSG_CLI_CYLS_OVERLAP),
                         low, high, clamp_ex->drive_name,
                         (ULONG)clamp_ex->low_cyl, (ULONG)clamp_ex->high_cyl);
-                cli_puts(outbuf); RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+                cli_puts(outbuf); RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
             }
             high = clamp_to - 1;
             DP_SNPRINTF(outbuf, GS(MSG_CLI_HIGH_CLAMPED),
@@ -1491,7 +1506,7 @@ static LONG cmd_addpart(const char *devname, ULONG unit, BOOL force,
         }
     }
 
-    pi = &s_rdb.parts[s_rdb.num_parts];
+    pi = &s_rdb->parts[s_rdb->num_parts];
     memset(pi, 0, sizeof(*pi));
     strncpy(pi->drive_name, name, 31); pi->drive_name[31] = '\0';
     pi->low_cyl       = low;
@@ -1512,12 +1527,12 @@ static LONG cmd_addpart(const char *devname, ULONG unit, BOOL force,
     pi->block_size    = 512;
     pi->sectors_per_block = blocksize / 512;
     if (pi->sectors_per_block == 0) pi->sectors_per_block = 1;
-    s_rdb.num_parts++;
+    s_rdb->num_parts++;
 
     {
         char dtbuf[16], szbuf[20];
-        ULONG blks_cyl = (s_rdb.heads > 0 && s_rdb.sectors > 0)
-                         ? s_rdb.heads * s_rdb.sectors : 1;
+        ULONG blks_cyl = (s_rdb->heads > 0 && s_rdb->sectors > 0)
+                         ? s_rdb->heads * s_rdb->sectors : 1;
         FormatDosType(dostype, dtbuf);
         FormatSize((UQUAD)(high - low + 1) * blks_cyl * 512UL, szbuf);
         DP_SNPRINTF(outbuf, GS(MSG_CLI_ADDING_PART),
@@ -1526,14 +1541,14 @@ static LONG cmd_addpart(const char *devname, ULONG unit, BOOL force,
     }
 
     DP_SNPRINTF(outbuf, GS(MSG_CLI_WRITE_RDB_PROMPT),
-            (unsigned)s_rdb.num_parts, (unsigned)s_rdb.num_fs);
+            (unsigned)s_rdb->num_parts, (unsigned)s_rdb->num_fs);
     if (!ask_yn(outbuf, force)) {
         cli_puts(GS(MSG_CLI_ABORTED_NO_CHANGES));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
     }
 
     cli_puts(GS(MSG_CLI_WRITING_RDB));
-    rc = cli_write_rdb(bd, &s_rdb) ? RETURN_OK : RETURN_ERROR;
+    rc = cli_write_rdb(bd, s_rdb) ? RETURN_OK : RETURN_ERROR;
     cli_puts(rc == RETURN_OK ? GS(MSG_CLI_OK) : GS(MSG_CLI_FAILED));
 
     /* Quick-format the new partition if VOLNAME was given (empty = no format).
@@ -1548,9 +1563,9 @@ static LONG cmd_addpart(const char *devname, ULONG unit, BOOL force,
             pi->deldir_blocks = (UBYTE)(n > 32 ? 32 : n);
         }
         pi->format_safe = safe ? 1 : 0;
-        if (!pi->heads)   pi->heads   = s_rdb.heads;
-        if (!pi->sectors) pi->sectors = s_rdb.sectors;
-        if (Format_Partition(bd, &s_rdb, pi, safe, mounted,
+        if (!pi->heads)   pi->heads   = s_rdb->heads;
+        if (!pi->sectors) pi->sectors = s_rdb->sectors;
+        if (Format_Partition(bd, s_rdb, pi, safe, mounted,
                              err, sizeof(err), note, sizeof(note))) {
             DP_SNPRINTF(outbuf, GS(MSG_CLI_FORMATTED_AS),
                     mounted[0] ? mounted : pi->drive_name, pi->volume_name);
@@ -1564,7 +1579,7 @@ static LONG cmd_addpart(const char *devname, ULONG unit, BOOL force,
         }
     }
 
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     BlockDev_Close(bd);
     return rc;
 }
@@ -1609,18 +1624,18 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_RUN_INIT));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
 
-    for (i = 0; i < s_rdb.num_parts; i++)
-        if (str_eq_ci(s_rdb.parts[i].drive_name, name)) { pi = &s_rdb.parts[i]; break; }
+    for (i = 0; i < s_rdb->num_parts; i++)
+        if (str_eq_ci(s_rdb->parts[i].drive_name, name)) { pi = &s_rdb->parts[i]; break; }
     if (!pi) {
         DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_NOT_FOUND_FMT), name);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     if      (FFS_IsSupportedType(pi->dos_type)) fskind = CLI_GROW_FFS;
@@ -1629,22 +1644,22 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
     else {
         DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_UNSUPPORTED_FMT), pi->drive_name);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
-    heads    = pi->heads   > 0 ? pi->heads   : s_rdb.heads;
-    sectors  = pi->sectors > 0 ? pi->sectors : s_rdb.sectors;
+    heads    = pi->heads   > 0 ? pi->heads   : s_rdb->heads;
+    sectors  = pi->sectors > 0 ? pi->sectors : s_rdb->sectors;
     blks_cyl = heads * sectors;
     if (blks_cyl == 0) {
         DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_BAD_SIZE_FMT), size_s);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     /* Max cylinder we may grow into: disk end, capped by the next partition. */
-    gap_max = s_rdb.hi_cyl;
-    for (i = 0; i < s_rdb.num_parts; i++) {
-        struct PartInfo *ex = &s_rdb.parts[i];
+    gap_max = s_rdb->hi_cyl;
+    for (i = 0; i < s_rdb->num_parts; i++) {
+        struct PartInfo *ex = &s_rdb->parts[i];
         if (ex == pi) continue;
         if (ex->low_cyl > pi->high_cyl && ex->low_cyl - 1 < gap_max)
             gap_max = ex->low_cyl - 1;
@@ -1652,7 +1667,7 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
     if (gap_max <= pi->high_cyl) {
         DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_NO_SPACE_FMT), pi->drive_name);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     old_hi = pi->high_cyl;
@@ -1665,13 +1680,13 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
         if (bytes == 0) {
             DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_BAD_SIZE_FMT), size_s);
             cli_puts(outbuf);
-            RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+            RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
         }
         add_cyls = (ULONG)(bytes / ((UQUAD)blks_cyl * 512UL));
         if (add_cyls == 0) {
             DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_BAD_SIZE_FMT), size_s);
             cli_puts(outbuf);
-            RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+            RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
         }
         new_hi = old_hi + add_cyls;
         if (new_hi > gap_max) {
@@ -1690,7 +1705,7 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
     DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_ASK), pi->drive_name);
     if (!ask_yn(outbuf, force)) {
         cli_puts(GS(MSG_CLI_ABORTED_NO_CHANGES));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
     }
 
     umerr[0] = rmerr[0] = '\0';
@@ -1712,21 +1727,21 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
             DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_UNMOUNT_FAIL_FMT),
                     pi->drive_name, umerr[0] ? umerr : GS(MSG_MOVE_IN_USE));
             cli_puts(outbuf);
-            RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+            RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
         }
     }
 
     switch (fskind) {
         case CLI_GROW_SFS:
-            ok = SFS_GrowPartition(bd, &s_rdb, pi, old_hi, 0,
+            ok = SFS_GrowPartition(bd, s_rdb, pi, old_hi, 0,
                                    outbuf, cli_grow_progress, NULL);
             break;
         case CLI_GROW_PFS:
-            ok = PFS_GrowPartition(bd, &s_rdb, pi, old_hi,
+            ok = PFS_GrowPartition(bd, s_rdb, pi, old_hi,
                                    outbuf, cli_grow_progress, NULL);
             break;
         default:
-            ok = FFS_GrowPartition(bd, &s_rdb, pi, old_hi, 0,
+            ok = FFS_GrowPartition(bd, s_rdb, pi, old_hi, 0,
                                    outbuf, cli_grow_progress, NULL);
             break;
     }
@@ -1741,7 +1756,7 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
             MountPartition(bd, pi, mnt, rmerr, sizeof(rmerr));
         DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_FAIL_FMT), diag);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     cli_grow_progress(NULL, GS(MSG_GROW_PROG_WRITING_RDB));
@@ -1749,7 +1764,7 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
     /* The filesystem is already resized on disk.  Retry the table write
        once, then spell out the exact recovery - the disk must not be used
        with a table that disagrees with the filesystem. */
-    if (!cli_write_rdb(bd, &s_rdb) && !cli_write_rdb(bd, &s_rdb)) {
+    if (!cli_write_rdb(bd, s_rdb) && !cli_write_rdb(bd, s_rdb)) {
         cli_puts(GS(MSG_CLI_FAILED));
         DP_SNPRINTF(outbuf, GS(MSG_CLI_RESIZE_RDBFAIL_FMT),
                     pi->drive_name,
@@ -1757,7 +1772,7 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
                     (unsigned long)pi->low_cyl, (unsigned long)old_hi,
                     pi->drive_name, (unsigned long)pi->high_cyl);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
     cli_puts(GS(MSG_CLI_OK));
 
@@ -1770,7 +1785,7 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
             MaterializeVolume(mnt);
             DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_REMOUNTED_FMT), pi->drive_name);
             cli_puts(outbuf);
-            RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+            RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
         }
     }
 
@@ -1787,7 +1802,7 @@ static LONG cmd_grow(const char *devname, ULONG unit, BOOL force,
 
     DP_SNPRINTF(outbuf, GS(MSG_SCR_GROW_REBOOT_FMT), pi->drive_name);
     cli_puts(outbuf);
-    RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+    RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1821,23 +1836,23 @@ static LONG cmd_shrinkinfo(const char *devname, ULONG unit,
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_RUN_INIT));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
 
-    for (i = 0; i < s_rdb.num_parts; i++)
-        if (str_eq_ci(s_rdb.parts[i].drive_name, name)) { pi = &s_rdb.parts[i]; break; }
+    for (i = 0; i < s_rdb->num_parts; i++)
+        if (str_eq_ci(s_rdb->parts[i].drive_name, name)) { pi = &s_rdb->parts[i]; break; }
     if (!pi) {
         DP_SNPRINTF(outbuf, GS(MSG_SI_NOT_FOUND_FMT), name);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
-    rc = ShrinkInfo_Run(bd, &s_rdb, pi, cli_si_emit, NULL);
+    rc = ShrinkInfo_Run(bd, s_rdb, pi, cli_si_emit, NULL);
 
-    RDB_FreeCode(&s_rdb); BlockDev_Close(bd);
+    RDB_FreeCode(s_rdb); BlockDev_Close(bd);
     return rc;
 }
 
@@ -1873,18 +1888,18 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_RUN_INIT));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
 
-    for (i = 0; i < s_rdb.num_parts; i++)
-        if (str_eq_ci(s_rdb.parts[i].drive_name, name)) { pi = &s_rdb.parts[i]; break; }
+    for (i = 0; i < s_rdb->num_parts; i++)
+        if (str_eq_ci(s_rdb->parts[i].drive_name, name)) { pi = &s_rdb->parts[i]; break; }
     if (!pi) {
         DP_SNPRINTF(outbuf, GS(MSG_SHR_NOT_FOUND_FMT), name);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     /* Full rollout: FFS, PFS3 and SFS - same set as GROW. */
@@ -1896,17 +1911,17 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
         DP_SNPRINTF(outbuf, GS(MSG_SHR_UNSUPPORTED_FMT),
                 pi->drive_name, (unsigned long)pi->dos_type);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
-    heads    = pi->heads   > 0 ? pi->heads   : s_rdb.heads;
-    sectors  = pi->sectors > 0 ? pi->sectors : s_rdb.sectors;
+    heads    = pi->heads   > 0 ? pi->heads   : s_rdb->heads;
+    sectors  = pi->sectors > 0 ? pi->sectors : s_rdb->sectors;
     blks_cyl = heads * sectors;
     ncyl     = pi->high_cyl - pi->low_cyl + 1;
     if (blks_cyl == 0 || ncyl == 0) {
         DP_SNPRINTF(outbuf, GS(MSG_SHR_BAD_SIZE_FMT), size_s);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     /* Read-only scan first: establishes the floor and gives the user
@@ -1915,19 +1930,19 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
     cli_puts(GS(MSG_SHR_SCANNING));
     memset(&rep, 0, sizeof(rep)); scanerr[0] = '\0';
     if (!((fskind == CLI_GROW_PFS)
-          ? PFS_ShrinkInfo(bd, &s_rdb, pi, &rep, scanerr)
+          ? PFS_ShrinkInfo(bd, s_rdb, pi, &rep, scanerr)
           : (fskind == CLI_GROW_SFS)
-          ? SFS_ShrinkInfo(bd, &s_rdb, pi, &rep, scanerr)
-          : FFS_ShrinkInfo(bd, &s_rdb, pi, &rep, scanerr))) {
+          ? SFS_ShrinkInfo(bd, s_rdb, pi, &rep, scanerr)
+          : FFS_ShrinkInfo(bd, s_rdb, pi, &rep, scanerr))) {
         DP_SNPRINTF(outbuf, GS(MSG_SHR_FAIL_FMT), scanerr);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
     bpc_fs   = (rep.total_blocks >= ncyl) ? rep.total_blocks / ncyl : 0;
     if (bpc_fs == 0) {
         DP_SNPRINTF(outbuf, GS(MSG_SHR_BAD_SIZE_FMT), size_s);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
     min_cyls = (rep.min_blocks + bpc_fs - 1) / bpc_fs;
     if (min_cyls == 0) min_cyls = 1;
@@ -1937,7 +1952,7 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
     if (min_high >= old_hi) {
         DP_SNPRINTF(outbuf, GS(MSG_SHR_NOTHING_FMT), pi->drive_name);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
     }
 
     /* Size semantics: bare value = TARGET size ("make it 30M"),
@@ -1952,14 +1967,14 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
         if (bytes == 0) {
             DP_SNPRINTF(outbuf, GS(MSG_SHR_BAD_SIZE_FMT), size_s);
             cli_puts(outbuf);
-            RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+            RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
         }
         if (relative) {
             ULONG rem_cyls = (ULONG)(bytes / cylbytes);
             if (rem_cyls == 0) {
                 DP_SNPRINTF(outbuf, GS(MSG_SHR_BAD_SIZE_FMT), size_s);
                 cli_puts(outbuf);
-                RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+                RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
             }
             new_hi = (rem_cyls < old_hi - pi->low_cyl) ? old_hi - rem_cyls
                                                        : min_high;
@@ -1973,7 +1988,7 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
                 DP_SNPRINTF(outbuf, GS(MSG_SHR_NOT_SMALLER_FMT),
                         pi->drive_name);
                 cli_puts(outbuf);
-                RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_WARN;
+                RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_WARN;
             }
         }
         if (new_hi < min_high) {
@@ -1992,7 +2007,7 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
     DP_SNPRINTF(outbuf, GS(MSG_SHR_ASK), pi->drive_name);
     if (!ask_yn(outbuf, force)) {
         cli_puts(GS(MSG_CLI_ABORTED_NO_CHANGES));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
     }
 
     umerr[0] = rmerr[0] = '\0';
@@ -2008,17 +2023,17 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
             DP_SNPRINTF(outbuf, GS(MSG_SHR_UNMOUNT_FAIL_FMT),
                     pi->drive_name, umerr[0] ? umerr : GS(MSG_MOVE_IN_USE));
             cli_puts(outbuf);
-            RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+            RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
         }
     }
 
     ok = (fskind == CLI_GROW_PFS)
-         ? PFS_ShrinkPartition(bd, &s_rdb, pi, old_hi,
+         ? PFS_ShrinkPartition(bd, s_rdb, pi, old_hi,
                                outbuf, cli_grow_progress, NULL)
          : (fskind == CLI_GROW_SFS)
-         ? SFS_ShrinkPartition(bd, &s_rdb, pi, old_hi,
+         ? SFS_ShrinkPartition(bd, s_rdb, pi, old_hi,
                                outbuf, cli_grow_progress, NULL)
-         : FFS_ShrinkPartition(bd, &s_rdb, pi, old_hi,
+         : FFS_ShrinkPartition(bd, s_rdb, pi, old_hi,
                                outbuf, cli_grow_progress, NULL);
 
     if (!ok) {
@@ -2029,7 +2044,7 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
             MountPartition(bd, pi, mnt, rmerr, sizeof(rmerr));
         DP_SNPRINTF(outbuf, GS(MSG_SHR_FAIL_FMT), diag);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     cli_grow_progress(NULL, GS(MSG_GROW_PROG_WRITING_RDB));
@@ -2037,7 +2052,7 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
     /* The filesystem is already resized on disk.  Retry the table write
        once, then spell out the exact recovery - the disk must not be used
        with a table that disagrees with the filesystem. */
-    if (!cli_write_rdb(bd, &s_rdb) && !cli_write_rdb(bd, &s_rdb)) {
+    if (!cli_write_rdb(bd, s_rdb) && !cli_write_rdb(bd, s_rdb)) {
         cli_puts(GS(MSG_CLI_FAILED));
         DP_SNPRINTF(outbuf, GS(MSG_CLI_RESIZE_RDBFAIL_FMT),
                     pi->drive_name,
@@ -2045,7 +2060,7 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
                     (unsigned long)pi->low_cyl, (unsigned long)old_hi,
                     pi->drive_name, (unsigned long)pi->high_cyl);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
     cli_puts(GS(MSG_CLI_OK));
 
@@ -2058,7 +2073,7 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
             MaterializeVolume(mnt);
             DP_SNPRINTF(outbuf, GS(MSG_SHR_REMOUNTED_FMT), pi->drive_name);
             cli_puts(outbuf);
-            RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+            RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
         }
     }
 
@@ -2071,7 +2086,7 @@ static LONG cmd_shrink(const char *devname, ULONG unit, BOOL force,
     }
     DP_SNPRINTF(outbuf, GS(MSG_SHR_REBOOT_FMT), pi->drive_name);
     cli_puts(outbuf);
-    RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+    RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2103,9 +2118,9 @@ static struct PartInfo *cli_find_part(const char *name_s, char *namebuf)
     nlen = (UWORD)strlen(namebuf);
     if (nlen > 0 && namebuf[nlen - 1] == ':') namebuf[--nlen] = '\0';
     if (nlen == 0) return NULL;
-    for (i = 0; i < s_rdb.num_parts; i++)
-        if (str_eq_ci(s_rdb.parts[i].drive_name, namebuf))
-            return &s_rdb.parts[i];
+    for (i = 0; i < s_rdb->num_parts; i++)
+        if (str_eq_ci(s_rdb->parts[i].drive_name, namebuf))
+            return &s_rdb->parts[i];
     return NULL;
 }
 
@@ -2124,8 +2139,8 @@ static LONG cmd_partout(const char *devname, ULONG unit,
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_RUN_INIT));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
@@ -2133,22 +2148,22 @@ static LONG cmd_partout(const char *devname, ULONG unit,
     if (!pi) {
         DP_SNPRINTF(outbuf, GS(MSG_PC_NOT_FOUND_FMT), name);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
-    if (!pi->heads)   pi->heads   = s_rdb.heads;
-    if (!pi->sectors) pi->sectors = s_rdb.sectors;
+    if (!pi->heads)   pi->heads   = s_rdb->heads;
+    if (!pi->sectors) pi->sectors = s_rdb->sectors;
 
     prog.last_pct = 0; prog.last_blocks = 0; err[0] = '\0';
     if (!PartClone_DumpToFile(bd, pi, file_s,
                               cli_move_progress, &prog, err, sizeof(err))) {
         cli_puts(err);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
     FormatDosType(pi->dos_type, szbuf);
     DP_SNPRINTF(outbuf, GS(MSG_PC_DUMP_OK_FMT), pi->drive_name, szbuf, file_s);
     cli_puts(outbuf);
-    if (err[0]) { cli_puts(err); RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_WARN; }
-    RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+    if (err[0]) { cli_puts(err); RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_WARN; }
+    RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
 }
 
 static LONG cmd_partin(const char *devname, ULONG unit, BOOL force,
@@ -2166,8 +2181,8 @@ static LONG cmd_partin(const char *devname, ULONG unit, BOOL force,
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_RUN_INIT));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
@@ -2175,30 +2190,30 @@ static LONG cmd_partin(const char *devname, ULONG unit, BOOL force,
     if (!pi) {
         DP_SNPRINTF(outbuf, GS(MSG_PC_NOT_FOUND_FMT), name);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     DP_SNPRINTF(outbuf, GS(MSG_PC_RESTORE_ASK), pi->drive_name);
     if (!ask_yn(outbuf, force)) {
         cli_puts(GS(MSG_CLI_ABORTED_NO_CHANGES));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
     }
 
     prog.last_pct = 0; prog.last_blocks = 0; err[0] = '\0';
-    if (!PartClone_RestoreToPart(bd, &s_rdb, pi, file_s,
+    if (!PartClone_RestoreToPart(bd, s_rdb, pi, file_s,
                                  cli_move_progress, &prog, err, sizeof(err))) {
         cli_puts(err);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
     cli_puts(GS(MSG_CLI_WRITING_RDB));
-    if (!cli_write_rdb(bd, &s_rdb)) {
+    if (!cli_write_rdb(bd, s_rdb)) {
         cli_puts(GS(MSG_CLI_FAILED));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
     cli_puts(GS(MSG_CLI_OK));
     DP_SNPRINTF(outbuf, GS(MSG_PC_RESTORE_OK_FMT), name, pi->drive_name);
     cli_puts(outbuf);
-    RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+    RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2206,8 +2221,7 @@ static LONG cmd_partin(const char *devname, ULONG unit, BOOL force,
 /*   PARTCLONE=<src> TO=<dst>                                          */
 /* ------------------------------------------------------------------ */
 
-/* Second RDB for cross-disk clone (large; keep out of the stack). */
-static struct RDBInfo s_rdb2;
+/* Second RDB for a cross-disk clone (~14 KB; allocated only when needed). */
 
 static LONG cmd_partclone(const char *devname, ULONG unit, BOOL force,
                           const char *src_s, const char *dst_s,
@@ -2229,16 +2243,16 @@ static LONG cmd_partclone(const char *devname, ULONG unit, BOOL force,
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_RUN_INIT));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
     src = cli_find_part(src_s, sname);
     if (!src) { DP_SNPRINTF(outbuf, GS(MSG_PC_NOT_FOUND_FMT), sname); cli_puts(outbuf);
-                RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR; }
-    if (!src->heads)   src->heads   = s_rdb.heads;
-    if (!src->sectors) src->sectors = s_rdb.sectors;
+                RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR; }
+    if (!src->heads)   src->heads   = s_rdb->heads;
+    if (!src->sectors) src->sectors = s_rdb->sectors;
 
     /* Destination: same disk, or a second device via TODEV=. */
     if (cross) {
@@ -2251,24 +2265,29 @@ static LONG cmd_partclone(const char *devname, ULONG unit, BOOL force,
     }
     if (cross) {
         dbd = cli_open_target(ddevname, dunit);
-        if (!dbd) { RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR; }
-        memset(&s_rdb2, 0, sizeof(s_rdb2));
-        if (!cli_read_rdb(dbd, &s_rdb2) || !s_rdb2.valid) {
-            cli_puts(GS(MSG_CLI_NO_RDB_RUN_INIT));
-            BlockDev_Close(dbd); RDB_FreeCode(&s_rdb); BlockDev_Close(bd);
+        if (!dbd) { RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR; }
+        drdb = (struct RDBInfo *)AllocVec(sizeof(*drdb), MEMF_PUBLIC | MEMF_CLEAR);
+        if (!drdb) {
+            cli_puts(GS(MSG_CLI_OUT_OF_MEMORY));
+            BlockDev_Close(dbd); RDB_FreeCode(s_rdb); BlockDev_Close(bd);
             return RETURN_ERROR;
         }
-        drdb = &s_rdb2;
+        if (!cli_read_rdb(dbd, drdb) || !drdb->valid) {
+            cli_puts(GS(MSG_CLI_NO_RDB_RUN_INIT));
+            FreeVec(drdb);
+            BlockDev_Close(dbd); RDB_FreeCode(s_rdb); BlockDev_Close(bd);
+            return RETURN_ERROR;
+        }
         dst  = NULL;
         { UWORD i, l; char tmp[32];
           strncpy(tmp, dst_s, 30); tmp[30] = 0;
           l = (UWORD)strlen(tmp); if (l && tmp[l-1] == ':') tmp[l-1] = 0;
-          for (i = 0; i < s_rdb2.num_parts; i++)
-              if (str_eq_ci(s_rdb2.parts[i].drive_name, tmp)) { dst = &s_rdb2.parts[i]; break; }
+          for (i = 0; i < drdb->num_parts; i++)
+              if (str_eq_ci(drdb->parts[i].drive_name, tmp)) { dst = &drdb->parts[i]; break; }
         }
     } else {
         dbd  = bd;
-        drdb = &s_rdb;
+        drdb = s_rdb;
         dst  = cli_find_part(dst_s, dname);
     }
     if (!dst) { DP_SNPRINTF(outbuf, GS(MSG_PC_NOT_FOUND_FMT), dst_s); cli_puts(outbuf);
@@ -2286,9 +2305,9 @@ static LONG cmd_partclone(const char *devname, ULONG unit, BOOL force,
         cli_puts(err); goto cleanup;
     }
     /* Bring the filesystem driver along if the destination lacks it. */
-    if (cross && PartClone_DestNeedsFS(&s_rdb, drdb, src->dos_type) == 1) {
+    if (cross && PartClone_DestNeedsFS(s_rdb, drdb, src->dos_type) == 1) {
         char dt[16];
-        if (PartClone_CopyFS(&s_rdb, drdb, src->dos_type, err, sizeof(err))) {
+        if (PartClone_CopyFS(s_rdb, drdb, src->dos_type, err, sizeof(err))) {
             FormatDosType(src->dos_type, dt);
             DP_SNPRINTF(outbuf, GS(MSG_PC_FS_COPIED_FMT), dt);
             cli_puts(outbuf);
@@ -2304,8 +2323,8 @@ static LONG cmd_partclone(const char *devname, ULONG unit, BOOL force,
     rc = RETURN_OK;
 
 cleanup:
-    if (cross) { RDB_FreeCode(&s_rdb2); BlockDev_Close(dbd); }
-    RDB_FreeCode(&s_rdb); BlockDev_Close(bd);
+    if (cross) { RDB_FreeCode(drdb); FreeVec(drdb); BlockDev_Close(dbd); }
+    RDB_FreeCode(s_rdb); BlockDev_Close(bd);
     return rc;
 }
 
@@ -2346,17 +2365,17 @@ static LONG cmd_addfs(const char *devname, ULONG unit, BOOL force,
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_RUN_INIT));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
-    if (s_rdb.num_fs >= MAX_FILESYSTEMS) {
+    if (s_rdb->num_fs >= MAX_FILESYSTEMS) {
         cli_puts(GS(MSG_CLI_FS_TABLE_FULL));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
-    fi = &s_rdb.filesystems[s_rdb.num_fs];
+    fi = &s_rdb->filesystems[s_rdb->num_fs];
     memset(fi, 0, sizeof(*fi));
     fi->dos_type     = dostype;
     fi->version      = version;
@@ -2376,26 +2395,26 @@ static LONG cmd_addfs(const char *devname, ULONG unit, BOOL force,
         fh = Open((STRPTR)file_s, MODE_OLDFILE);
         if (!fh) {
             cli_puts(GS(MSG_CLI_FAILED_OPEN_FILE));
-            RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+            RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
         }
         Seek(fh, 0, OFFSET_END);
         fsize = Seek(fh, 0, OFFSET_BEGINNING);
         if (fsize <= 0) {
             cli_puts(GS(MSG_CLI_FAILED_EMPTY_SEEK));
-            Close(fh); RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+            Close(fh); RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
         }
         if (fsize > (LONG)MAX_FS_CODE_SIZE) {
             cli_puts(GS(MSG_CLI_ADDFS_TOO_BIG));
-            Close(fh); RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+            Close(fh); RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
         }
         buf = (UBYTE *)AllocVec((ULONG)fsize, MEMF_PUBLIC | MEMF_CLEAR);
         if (!buf) {
             cli_puts(GS(MSG_CLI_FAILED_OUT_OF_MEMORY));
-            Close(fh); RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+            Close(fh); RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
         }
         if (Read(fh, buf, fsize) != fsize) {
             cli_puts(GS(MSG_CLI_FAILED_READ_ERROR));
-            FreeVec(buf); Close(fh); RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+            FreeVec(buf); Close(fh); RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
         }
         Close(fh);
         fi->code      = buf;
@@ -2403,7 +2422,7 @@ static LONG cmd_addfs(const char *devname, ULONG unit, BOOL force,
         { char szbuf[20]; FormatSize((UQUAD)fsize, szbuf);
           DP_SNPRINTF(outbuf, GS(MSG_CLI_OK_SIZE), szbuf); cli_puts(outbuf); }
     }
-    s_rdb.num_fs++;
+    s_rdb->num_fs++;
 
     FormatDosType(dostype, dtbuf);
     if (version)
@@ -2414,17 +2433,17 @@ static LONG cmd_addfs(const char *devname, ULONG unit, BOOL force,
     cli_puts(outbuf);
 
     DP_SNPRINTF(outbuf, GS(MSG_CLI_WRITE_RDB_PROMPT),
-            (unsigned)s_rdb.num_parts, (unsigned)s_rdb.num_fs);
+            (unsigned)s_rdb->num_parts, (unsigned)s_rdb->num_fs);
     if (!ask_yn(outbuf, force)) {
         cli_puts(GS(MSG_CLI_ABORTED_NO_CHANGES));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
     }
 
     cli_puts(GS(MSG_CLI_WRITING_RDB));
-    rc = cli_write_rdb(bd, &s_rdb) ? RETURN_OK : RETURN_ERROR;
+    rc = cli_write_rdb(bd, s_rdb) ? RETURN_OK : RETURN_ERROR;
     cli_puts(rc == RETURN_OK ? GS(MSG_CLI_OK) : GS(MSG_CLI_FAILED));
 
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     BlockDev_Close(bd);
     return rc;
 }
@@ -2451,15 +2470,15 @@ static LONG cmd_check(const char *devname, ULONG unit)
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_ERR_NO_RDB_FOUND));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
 
-    errs = RDB_IntegrityCheck(bd, &s_rdb, check_cli_cb, NULL);
+    errs = RDB_IntegrityCheck(bd, s_rdb, check_cli_cb, NULL);
 
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     BlockDev_Close(bd);
     return (errs == 0) ? RETURN_OK : RETURN_WARN;
 }
@@ -2485,8 +2504,8 @@ static LONG cmd_verify(const char *devname, ULONG unit, const char *path)
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_ERR_NO_RDB_FOUND));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
@@ -2494,7 +2513,7 @@ static LONG cmd_verify(const char *devname, ULONG unit, const char *path)
     fh = Open((UBYTE *)path, MODE_OLDFILE);
     if (!fh) {
         cli_puts(GS(MSG_CLI_CANNOT_OPEN_BACKUP));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
     Seek(fh, 0, OFFSET_END);
     fsize = Seek(fh, 0, OFFSET_BEGINNING);
@@ -2503,7 +2522,7 @@ static LONG cmd_verify(const char *devname, ULONG unit, const char *path)
         DP_SNPRINTF(outbuf, GS(MSG_CLI_FILESIZE_NE_BLOCKSIZE2),
                 (long)fsize, (unsigned long)bd->block_size);
         cli_puts(outbuf);
-        Close(fh); RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        Close(fh); RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     fbuf = (UBYTE *)AllocVec(bd->block_size, MEMF_PUBLIC | MEMF_CLEAR);
@@ -2512,20 +2531,20 @@ static LONG cmd_verify(const char *devname, ULONG unit, const char *path)
         Close(fh);
         if (fbuf) FreeVec(fbuf);
         if (dbuf) FreeVec(dbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     if (Read(fh, fbuf, fsize) != fsize) {
         cli_puts(GS(MSG_CLI_FILE_READ_ERROR));
         Close(fh); FreeVec(fbuf); FreeVec(dbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
     Close(fh);
 
-    if (!BlockDev_ReadBlock(bd, s_rdb.block_num, dbuf)) {
+    if (!BlockDev_ReadBlock(bd, s_rdb->block_num, dbuf)) {
         cli_puts(GS(MSG_CLI_CANNOT_READ_RDB_DISK));
         FreeVec(fbuf); FreeVec(dbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     for (i = 0; i < bd->block_size; i++) {
@@ -2536,7 +2555,7 @@ static LONG cmd_verify(const char *devname, ULONG unit, const char *path)
     }
 
     FreeVec(fbuf); FreeVec(dbuf);
-    RDB_FreeCode(&s_rdb); BlockDev_Close(bd);
+    RDB_FreeCode(s_rdb); BlockDev_Close(bd);
 
     if (diff_count == 0) {
         cli_puts(GS(MSG_CLI_VERIFY_MATCH));
@@ -2682,19 +2701,19 @@ static LONG cmd_zeropart(const char *devname, ULONG unit, BOOL force,
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_ERR_NO_RDB_FOUND));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
 
-    for (i = 0; i < s_rdb.num_parts; i++)
-        if (str_eq_ci(s_rdb.parts[i].drive_name, name)) { pi = &s_rdb.parts[i]; break; }
+    for (i = 0; i < s_rdb->num_parts; i++)
+        if (str_eq_ci(s_rdb->parts[i].drive_name, name)) { pi = &s_rdb->parts[i]; break; }
 
     if (!pi) {
         DP_SNPRINTF(outbuf, GS(MSG_CLI_ZEROPART_NOT_FOUND_FMT), name);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_ERROR;
     }
 
     DP_SNPRINTF(outbuf, GS(MSG_CLI_ZEROPART_CONFIRM_FMT),
@@ -2703,18 +2722,18 @@ static LONG cmd_zeropart(const char *devname, ULONG unit, BOOL force,
                 (unsigned long)pi->high_cyl);
     if (!ask_yn(outbuf, force)) {
         cli_puts(GS(MSG_CLI_ABORTED_NO_CHANGES));
-        RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+        RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
     }
 
-    heads   = pi->heads   > 0 ? pi->heads   : s_rdb.heads;
-    sectors = pi->sectors > 0 ? pi->sectors : s_rdb.sectors;
+    heads   = pi->heads   > 0 ? pi->heads   : s_rdb->heads;
+    sectors = pi->sectors > 0 ? pi->sectors : s_rdb->sectors;
     total_blocks = (pi->high_cyl - pi->low_cyl + 1) * heads * sectors;
 
     DP_SNPRINTF(outbuf, GS(MSG_CLI_ZEROPART_WRITING_FMT),
                 pi->drive_name, (unsigned long)total_blocks);
     cli_puts(outbuf);
 
-    ok = PART_Zero(bd, &s_rdb, pi, err_buf, NULL, NULL);
+    ok = PART_Zero(bd, s_rdb, pi, err_buf, NULL, NULL);
 
     if (ok) {
         DP_SNPRINTF(outbuf, GS(MSG_CLI_ZEROPART_OK_FMT),
@@ -2725,7 +2744,7 @@ static LONG cmd_zeropart(const char *devname, ULONG unit, BOOL force,
         cli_puts(outbuf);
     }
 
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     BlockDev_Close(bd);
     return ok ? RETURN_OK : RETURN_ERROR;
 }
@@ -2754,29 +2773,29 @@ static LONG cmd_delpart(const char *devname, ULONG unit, BOOL force,
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_ERR_NO_RDB_FOUND));
         BlockDev_Close(bd); return RETURN_ERROR;
     }
 
-    for (i = 0; i < s_rdb.num_parts; i++) {
-        if (str_eq_ci(s_rdb.parts[i].drive_name, name)) {
+    for (i = 0; i < s_rdb->num_parts; i++) {
+        if (str_eq_ci(s_rdb->parts[i].drive_name, name)) {
             DP_SNPRINTF(outbuf, GS(MSG_CLI_DELETE_CONFIRM),
-                    s_rdb.parts[i].drive_name,
-                    (ULONG)s_rdb.parts[i].low_cyl,
-                    (ULONG)s_rdb.parts[i].high_cyl);
+                    s_rdb->parts[i].drive_name,
+                    (ULONG)s_rdb->parts[i].low_cyl,
+                    (ULONG)s_rdb->parts[i].high_cyl);
             if (!ask_yn(outbuf, force)) {
                 cli_puts(GS(MSG_CLI_ABORTED_NO_CHANGES));
-                RDB_FreeCode(&s_rdb); BlockDev_Close(bd); return RETURN_OK;
+                RDB_FreeCode(s_rdb); BlockDev_Close(bd); return RETURN_OK;
             }
 
-            for (j = i; j + 1 < s_rdb.num_parts; j++)
-                s_rdb.parts[j] = s_rdb.parts[j + 1];
-            s_rdb.num_parts--;
+            for (j = i; j + 1 < s_rdb->num_parts; j++)
+                s_rdb->parts[j] = s_rdb->parts[j + 1];
+            s_rdb->num_parts--;
 
             cli_puts(GS(MSG_CLI_WRITING_RDB));
-            rc = cli_write_rdb(bd, &s_rdb) ? RETURN_OK : RETURN_ERROR;
+            rc = cli_write_rdb(bd, s_rdb) ? RETURN_OK : RETURN_ERROR;
             cli_puts(rc == RETURN_OK ? GS(MSG_CLI_OK) : GS(MSG_CLI_FAILED));
 
             /* Unmount the deleted device so it's gone without a reboot. */
@@ -2791,7 +2810,7 @@ static LONG cmd_delpart(const char *devname, ULONG unit, BOOL force,
                 cli_puts(outbuf);
             }
 
-            RDB_FreeCode(&s_rdb);
+            RDB_FreeCode(s_rdb);
             BlockDev_Close(bd);
             return rc;
         }
@@ -2799,7 +2818,7 @@ static LONG cmd_delpart(const char *devname, ULONG unit, BOOL force,
 
     DP_SNPRINTF(outbuf, GS(MSG_CLI_PART_NOT_FOUND), name);
     cli_puts(outbuf);
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     BlockDev_Close(bd);
     return RETURN_ERROR;
 }
@@ -2817,12 +2836,12 @@ static LONG cmd_init_new(struct BlockDev *bd, BOOL force)
     print_dev_info(bd);
 
     /* Check for existing RDB - affects question wording only */
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (cli_read_rdb(bd, &s_rdb) && s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (cli_read_rdb(bd, s_rdb) && s_rdb->valid) {
         DP_SNPRINTF(outbuf, GS(MSG_CLI_INIT_EXISTING_RDB),
-                (ULONG)s_rdb.cylinders, (unsigned)s_rdb.num_parts);
+                (ULONG)s_rdb->cylinders, (unsigned)s_rdb->num_parts);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         question = GS(MSG_CLI_INIT_Q_DESTROY);
     } else {
         question = GS(MSG_CLI_INIT_Q_NEW);
@@ -2845,10 +2864,10 @@ static LONG cmd_init_new(struct BlockDev *bd, BOOL force)
     if (!ask_yn(question, force))
         return RETURN_OK;
 
-    RDB_InitFresh(&s_rdb, cyls, heads, sects);
+    RDB_InitFresh(s_rdb, cyls, heads, sects);
 
     cli_puts(GS(MSG_CLI_WRITING_RDB));
-    if (!cli_write_rdb(bd, &s_rdb)) {
+    if (!cli_write_rdb(bd, s_rdb)) {
         cli_puts(GS(MSG_CLI_FAILED));
         return RETURN_ERROR;
     }
@@ -2869,63 +2888,63 @@ static LONG cmd_init_newgeo(struct BlockDev *bd, BOOL force)
     print_dev_info(bd);
 
     /* Require an existing RDB */
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_USE_INIT));
         return RETURN_ERROR;
     }
 
-    if (s_rdb.heads == 0 || s_rdb.sectors == 0) {
+    if (s_rdb->heads == 0 || s_rdb->sectors == 0) {
         cli_puts(GS(MSG_CLI_RDB_INVALID_GEOMETRY));
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         return RETURN_ERROR;
     }
 
     if (bd->total_bytes == 0) {
         cli_puts(GS(MSG_CLI_CANNOT_DETERMINE_SIZE));
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         return RETURN_ERROR;
     }
 
     /* New cylinder count: keep existing H/S, re-derive C from actual sectors */
     new_cyls = (ULONG)((bd->total_bytes / 512UL)
-                       / ((UQUAD)s_rdb.heads * s_rdb.sectors));
+                       / ((UQUAD)s_rdb->heads * s_rdb->sectors));
 
     {
-        UQUAD old_size = (UQUAD)s_rdb.cylinders * s_rdb.heads
-                         * s_rdb.sectors * 512UL;
+        UQUAD old_size = (UQUAD)s_rdb->cylinders * s_rdb->heads
+                         * s_rdb->sectors * 512UL;
         FormatSize(old_size,       szbuf_old);
         FormatSize(bd->total_bytes, szbuf_new);
     }
 
     DP_SNPRINTF(outbuf, GS(MSG_CLI_NEWGEO_COMPARE),
-            (ULONG)s_rdb.cylinders, szbuf_old,
+            (ULONG)s_rdb->cylinders, szbuf_old,
             new_cyls,               szbuf_new);
     cli_puts(outbuf);
 
-    if (new_cyls <= s_rdb.cylinders) {
+    if (new_cyls <= s_rdb->cylinders) {
         cli_puts(GS(MSG_CLI_NEWGEO_NO_UPDATE));
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         return RETURN_OK;
     }
 
     DP_SNPRINTF(outbuf, GS(MSG_CLI_NEWGEO_CHANGE),
-            (ULONG)s_rdb.cylinders, new_cyls);
+            (ULONG)s_rdb->cylinders, new_cyls);
     cli_puts(outbuf);
 
     if (!ask_yn(GS(MSG_CLI_NEWGEO_ASK_UPDATE), force)) {
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         return RETURN_OK;
     }
 
-    s_rdb.cylinders = new_cyls;
-    s_rdb.hi_cyl    = new_cyls - 1;
+    s_rdb->cylinders = new_cyls;
+    s_rdb->hi_cyl    = new_cyls - 1;
     /* lo_cyl stays the same - partitions are already at their cylinder offsets */
 
     cli_puts(GS(MSG_CLI_WRITING_UPDATED_RDB));
-    if (!cli_write_rdb(bd, &s_rdb)) {
+    if (!cli_write_rdb(bd, s_rdb)) {
         cli_puts(GS(MSG_CLI_FAILED));
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         return RETURN_ERROR;
     }
     cli_puts(GS(MSG_CLI_OK));
@@ -2934,7 +2953,7 @@ static LONG cmd_init_newgeo(struct BlockDev *bd, BOOL force)
             new_cyls, szbuf_new);
     cli_puts(outbuf);
 
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     return RETURN_OK;
 }
 
@@ -2950,12 +2969,12 @@ static LONG cmd_init_newmbr(struct BlockDev *bd, BOOL force)
 
     print_dev_info(bd);
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (cli_read_rdb(bd, &s_rdb) && s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (cli_read_rdb(bd, s_rdb) && s_rdb->valid) {
         DP_SNPRINTF(outbuf, GS(MSG_CLI_INIT_EXISTING_RDB),
-                (ULONG)s_rdb.cylinders, (unsigned)s_rdb.num_parts);
+                (ULONG)s_rdb->cylinders, (unsigned)s_rdb->num_parts);
         cli_puts(outbuf);
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         question = GS(MSG_CLI_INIT_Q_DESTROY);
     } else {
         question = GS(MSG_CLI_INIT_Q_NEW);
@@ -2977,12 +2996,12 @@ static LONG cmd_init_newmbr(struct BlockDev *bd, BOOL force)
     if (!ask_yn(question, force))
         return RETURN_OK;
 
-    RDB_InitFresh(&s_rdb, cyls, heads, sects);
-    s_rdb.rdb_block_lo = 1;
-    s_rdb.block_num    = 1;
+    RDB_InitFresh(s_rdb, cyls, heads, sects);
+    s_rdb->rdb_block_lo = 1;
+    s_rdb->block_num    = 1;
 
     cli_puts(GS(MSG_CLI_WRITING_RDB));
-    if (!cli_write_rdb(bd, &s_rdb)) {
+    if (!cli_write_rdb(bd, s_rdb)) {
         cli_puts(GS(MSG_CLI_FAILED));
         return RETURN_ERROR;
     }
@@ -3350,15 +3369,15 @@ static LONG cmd_addmbr(const char *devname, ULONG unit,
     bd = cli_open_target(devname, unit);
     if (!bd) return RETURN_ERROR;
 
-    memset(&s_rdb, 0, sizeof(s_rdb));
-    if (!cli_read_rdb(bd, &s_rdb) || !s_rdb.valid) {
+    memset(s_rdb, 0, sizeof(*s_rdb));
+    if (!cli_read_rdb(bd, s_rdb) || !s_rdb->valid) {
         cli_puts(GS(MSG_CLI_NO_RDB_FOUND));
         BlockDev_Close(bd);
         return RETURN_ERROR;
     }
-    if (s_rdb.heads == 0 || s_rdb.sectors == 0) {
+    if (s_rdb->heads == 0 || s_rdb->sectors == 0) {
         cli_puts(GS(MSG_CLI_ADDMBR_GEO_ZERO));
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         BlockDev_Close(bd);
         return RETURN_ERROR;
     }
@@ -3366,21 +3385,21 @@ static LONG cmd_addmbr(const char *devname, ULONG unit,
     memset(&mbr, 0, sizeof(mbr));
     if (!MBR_Read(bd, &mbr) || !mbr.valid) {
         cli_puts(GS(MSG_CLI_ADDMBR_NO_MBR));
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         BlockDev_Close(bd);
         return RETURN_ERROR;
     }
 
     if (!parse_dec_strict(startcyl_s, &lo_cyl)) {
         cli_puts(GS(MSG_CLI_ADDMBR_BAD_START));
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         BlockDev_Close(bd);
         return RETURN_WARN;
     }
-    if (!cli_parse_high(endcyl_s, lo_cyl, s_rdb.hi_cyl,
-                        s_rdb.heads, s_rdb.sectors, &hi_cyl) || hi_cyl < lo_cyl) {
+    if (!cli_parse_high(endcyl_s, lo_cyl, s_rdb->hi_cyl,
+                        s_rdb->heads, s_rdb->sectors, &hi_cyl) || hi_cyl < lo_cyl) {
         cli_puts(GS(MSG_CLI_ADDMBR_BAD_END));
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         BlockDev_Close(bd);
         return RETURN_WARN;
     }
@@ -3389,14 +3408,14 @@ static LONG cmd_addmbr(const char *devname, ULONG unit,
         if (!mbr.parts[slot].present) break;
     if (slot >= MBR_MAX_PARTS) {
         cli_puts(GS(MSG_CLI_ADDMBR_FULL));
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         BlockDev_Close(bd);
         return RETURN_ERROR;
     }
     /* same rules as the GUI: RDB reserved area and RDB partitions too */
-    if (MBR_RangeConflicts(lo_cyl, hi_cyl, &s_rdb, &mbr, 0xFF)) {
+    if (MBR_RangeConflicts(lo_cyl, hi_cyl, s_rdb, &mbr, 0xFF)) {
         cli_puts(GS(MSG_CLI_ADDMBR_OVERLAP));
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         BlockDev_Close(bd);
         return RETURN_ERROR;
     }
@@ -3404,18 +3423,18 @@ static LONG cmd_addmbr(const char *devname, ULONG unit,
     for (ki = 0; ki < MBR_MAX_PARTS; ki++) {
         ULONG elo, ehi;
         if (!mbr.parts[ki].present) continue;
-        elo = MBR_LBAToCyl(mbr.parts[ki].lba_start, s_rdb.heads, s_rdb.sectors);
+        elo = MBR_LBAToCyl(mbr.parts[ki].lba_start, s_rdb->heads, s_rdb->sectors);
         ehi = MBR_LBAToCyl(mbr.parts[ki].lba_start + mbr.parts[ki].lba_size - 1,
-                            s_rdb.heads, s_rdb.sectors);
+                            s_rdb->heads, s_rdb->sectors);
         if (lo_cyl <= ehi && hi_cyl >= elo) {
             cli_puts(GS(MSG_CLI_ADDMBR_OVERLAP));
-            RDB_FreeCode(&s_rdb);
+            RDB_FreeCode(s_rdb);
             BlockDev_Close(bd);
             return RETURN_ERROR;
         }
     }
 
-    cyl_secs  = s_rdb.heads * s_rdb.sectors;
+    cyl_secs  = s_rdb->heads * s_rdb->sectors;
     lba_start = lo_cyl * cyl_secs;
     lba_size  = (hi_cyl - lo_cyl + 1) * cyl_secs;
 
@@ -3428,7 +3447,7 @@ static LONG cmd_addmbr(const char *devname, ULONG unit,
 
     if (!MBR_Write(bd, &mbr)) {
         cli_puts(GS(MSG_CLI_ADDMBR_WRITE_FAIL));
-        RDB_FreeCode(&s_rdb);
+        RDB_FreeCode(s_rdb);
         BlockDev_Close(bd);
         return RETURN_ERROR;
     }
@@ -3439,7 +3458,7 @@ static LONG cmd_addmbr(const char *devname, ULONG unit,
             typebuf, active ? "Active" : "");
     cli_puts(outbuf);
 
-    RDB_FreeCode(&s_rdb);
+    RDB_FreeCode(s_rdb);
     BlockDev_Close(bd);
     return RETURN_OK;
 }
@@ -3533,6 +3552,13 @@ LONG cli_run(void)
         !args[ARG_COPYDISK] && !args[ARG_BADBLOCKS] && !args[ARG_MOUNTLIST]) {
         FreeArgs(rdargs);
         return CLI_NO_ARGS;
+    }
+
+    s_rdb = (struct RDBInfo *)AllocVec(sizeof(*s_rdb), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!s_rdb) {
+        cli_puts(GS(MSG_CLI_OUT_OF_MEMORY));
+        FreeArgs(rdargs);
+        return RETURN_FAIL;
     }
 
     if (args[ARG_LISTDEV])
@@ -3724,5 +3750,6 @@ LONG cli_run(void)
     }
 
     FreeArgs(rdargs);
+    FreeVec(s_rdb); s_rdb = NULL;
     return rc;
 }
