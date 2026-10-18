@@ -3069,6 +3069,7 @@ BOOL partview_run(const char *devname, ULONG unit)
                             {
                                 struct PartInfo new_pi;
                                 memset(&new_pi, 0, sizeof(new_pi));
+                                new_pi.is_new = 1;
                                 next_drive_name(rdb, new_pi.drive_name);
                                 new_pi.dos_type     = 0x444F5301UL;   /* FFS */
                                 new_pi.low_cyl      = drag_new_lo;
@@ -3531,6 +3532,7 @@ BOOL partview_run(const char *devname, ULONG unit)
                         if (lo > hi) break;
 
                         memset(&new_pi, 0, sizeof(new_pi));
+                        new_pi.is_new = 1;
                         next_drive_name(rdb, new_pi.drive_name);
                         new_pi.dos_type     = 0x444F5301UL;   /* FFS */
                         new_pi.low_cyl      = lo;

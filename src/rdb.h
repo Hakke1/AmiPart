@@ -190,6 +190,9 @@ struct PartInfo {
                               (0 = leave disabled, max 32; 31 entries per block) */
     UBYTE format_safe;     /* SAFE keyword: use the OS formatter (real handler)
                               instead of the internal one (nativefmt.c) */
+    UBYTE is_new;          /* created this session, never written yet: RDB_Write
+                              clears a $FFFFFFFF boot-block ID (see
+                              wipe_new_boot_blocks) and then resets this */
 };
 
 struct FSInfo {

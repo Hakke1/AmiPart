@@ -779,6 +779,7 @@ static LONG do_addpart(ULONG ln, char **tok, UWORD ntok)
 
     pi = &s_st->rdb.parts[s_st->rdb.num_parts];
     memset(pi, 0, sizeof(*pi));
+    pi->is_new        = 1;
     strncpy(pi->drive_name, name, 31); pi->drive_name[31] = '\0';
     pi->low_cyl       = low;
     pi->high_cyl      = high;

@@ -1810,6 +1810,55 @@ static void fill_lseg_chain(UBYTE *big_buf, ULONG base_blk, ULONG block_size,
 static RDB_WriteProgressFn s_write_progress_fn = NULL;
 static void               *s_write_progress_ud = NULL;
 
+/* ------------------------------------------------------------------ */
+/* wipe_new_boot_blocks - FFS 3.1 (and older) reads the first longword  */
+/* of a partition as its DOS type.  Erased flash (CF/SD/DOM) reads back */
+/* as $FF bytes, and $FFFFFFFF == -1 == ID_NO_DISK_PRESENT, so a freshly */
+/* added, unformatted partition shows "no disk in drive" instead of NDOS */
+/* and cannot be formatted from Workbench (fixed in OS 3.9 BB2 / 3.2).   */
+/*                                                                      */
+/* For every partition created this session (is_new) look at its boot   */
+/* blocks and zero only those whose first longword really is $FFFFFFFF. */
+/* That value is never a valid filesystem ID, so a partition re-added   */
+/* over existing data (the delete-and-recreate recovery trick) is left  */
+/* exactly as it was.  Best effort: the RDB is already on disk, so a    */
+/* read or write failure here is not an error.                          */
+/* ------------------------------------------------------------------ */
+static void wipe_new_boot_blocks(struct BlockDev *bd, struct RDBInfo *rdb)
+{
+    UBYTE *rb, *zb;
+    ULONG  bsz = bd->block_size > 0 ? bd->block_size : 512;
+    UWORD  i;
+
+    rb = (UBYTE *)AllocVec(bsz * 2, MEMF_PUBLIC | MEMF_CLEAR);
+    if (!rb) return;
+    zb = rb + bsz;                                   /* stays zeroed */
+
+    for (i = 0; i < rdb->num_parts; i++) {
+        struct PartInfo *pi = &rdb->parts[i];
+        ULONG heads, sectors, spb, reserved, part_abs, n, k;
+
+        if (!pi->is_new) continue;
+        pi->is_new = 0;                              /* one shot per write */
+
+        heads   = pi->heads   > 0 ? pi->heads   : rdb->heads;
+        sectors = pi->sectors > 0 ? pi->sectors : rdb->sectors;
+        if (heads == 0 || sectors == 0) continue;
+        spb      = pi->sectors_per_block > 0 ? pi->sectors_per_block : 1;
+        reserved = pi->reserved_blks > 0 ? pi->reserved_blks : 2UL;
+        part_abs = pi->low_cyl * heads * sectors;
+        n        = reserved * spb;                   /* device blocks */
+        if (n > 16) n = 16;
+
+        for (k = 0; k < n; k++) {
+            if (!BlockDev_ReadBlock(bd, part_abs + k, rb)) break;
+            if (BE32R(((const ULONG *)rb)[0]) != 0xFFFFFFFFUL) continue;
+            if (!BlockDev_WriteBlock(bd, part_abs + k, zb)) break;
+        }
+    }
+    FreeVec(rb);
+}
+
 void RDB_SetWriteProgressHook(RDB_WriteProgressFn fn, void *ud)
 {
     s_write_progress_fn = fn;
@@ -2210,6 +2259,8 @@ BOOL RDB_Write(struct BlockDev *bd, struct RDBInfo *rdb)
             FreeVec(rb);
         }
     }
+
+    wipe_new_boot_blocks(bd, rdb);
 
     FreeVec(big_buf);
     return TRUE;

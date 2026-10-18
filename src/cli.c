@@ -1508,6 +1508,7 @@ static LONG cmd_addpart(const char *devname, ULONG unit, BOOL force,
 
     pi = &s_rdb->parts[s_rdb->num_parts];
     memset(pi, 0, sizeof(*pi));
+    pi->is_new        = 1;
     strncpy(pi->drive_name, name, 31); pi->drive_name[31] = '\0';
     pi->low_cyl       = low;
     pi->high_cyl      = high;
