@@ -4519,3 +4519,12 @@ MSG_QF_MOUNTED_OTHER_FMT
 MSG_QF_NAME_TAKEN_FMT
 device name %s: is still in use - reboot to use the new size
 ;
+MSG_PV_BTN_ZOOMFIT
+Fit
+;
+MSG_PV_BTN_ZOOMSEL
+Selected
+;
+MSG_PV_ZOOM_FMT
+Zoom %lu.%lux
+;
